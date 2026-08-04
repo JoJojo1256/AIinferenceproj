@@ -6,7 +6,7 @@ The implementation is being developed in phases. See [`PROJECT.md`](PROJECT.md) 
 
 ## Current status
 
-Phase 0 is scaffolded: model loading, baseline autoregressive decoding, workload definitions, measurement aggregation, provenance capture, and an Oscar Slurm entrypoint. A GPU-produced baseline result is still required to complete the phase.
+Phase 0 is scaffolded, and Phase 1 implements draft proposal, batched target verification, modified rejection sampling, corrected-token resampling, greedy decoding, and acceptance-rate logging. Oscar GPU runs are still required to produce the baseline and full-model speculative results.
 
 ## Oscar quick start
 
@@ -20,6 +20,7 @@ bash env/setup.sh
 
 export HF_TOKEN="<your-token>"
 sbatch scripts/slurm_baseline.sh
+sbatch scripts/slurm_specdec.sh
 ```
 
 Accept the applicable Llama licenses on Hugging Face before submitting the job. The free account without a PI has no persistent `~/data` directory, so copy important raw results out of `~/scratch`. Never commit the token or model weights.

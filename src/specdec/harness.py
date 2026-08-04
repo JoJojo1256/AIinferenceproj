@@ -11,7 +11,7 @@ from typing import Any
 import torch
 import transformers
 
-from specdec.metrics import GenerationMetrics, summarize_trials
+from specdec.metrics import GenerationMetrics, SpeculativeGenerationMetrics, summarize_trials
 
 GenerateFunction = Callable[[str, int], GenerationMetrics]
 
@@ -66,6 +66,24 @@ def run_benchmark(
         prompt = prompts[trial_index % len(prompts)]
         measured.append(generate(prompt, seed + warmup_runs + trial_index))
 
+    summary = summarize_trials(measured)
+    speculative_trials = [
+        trial for trial in measured if isinstance(trial, SpeculativeGenerationMetrics)
+    ]
+    if speculative_trials:
+        proposed_tokens = sum(trial.proposed_tokens for trial in speculative_trials)
+        accepted_tokens = sum(trial.accepted_tokens for trial in speculative_trials)
+        summary.update(
+            {
+                "proposed_tokens": proposed_tokens,
+                "accepted_tokens": accepted_tokens,
+                "acceptance_rate": accepted_tokens / proposed_tokens if proposed_tokens else 0.0,
+                "target_forward_passes": sum(
+                    trial.target_forward_passes for trial in speculative_trials
+                ),
+            }
+        )
+
     return {
         "provenance": collect_provenance(),
         "configuration": {
@@ -74,7 +92,7 @@ def run_benchmark(
             "seed": seed,
             "prompt_count": len(prompts),
         },
-        "summary": summarize_trials(measured),
+        "summary": summary,
         "trials": [trial.to_dict() for trial in measured],
     }
 

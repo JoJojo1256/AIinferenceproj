@@ -32,6 +32,25 @@ class GenerationMetrics:
         return data
 
 
+@dataclass(frozen=True)
+class SpeculativeGenerationMetrics(GenerationMetrics):
+    proposed_tokens: int
+    accepted_tokens: int
+    target_forward_passes: int
+    block_latencies_ms: list[float]
+
+    @property
+    def acceptance_rate(self) -> float:
+        if self.proposed_tokens == 0:
+            return 0.0
+        return self.accepted_tokens / self.proposed_tokens
+
+    def to_dict(self) -> dict[str, object]:
+        data = super().to_dict()
+        data["acceptance_rate"] = self.acceptance_rate
+        return data
+
+
 def percentile(values: Sequence[float], q: float) -> float:
     if not values:
         return 0.0

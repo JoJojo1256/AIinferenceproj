@@ -1,4 +1,5 @@
 .venv/
+.hf-cache/
 *.venv/
 __pycache__/
 *.py[cod]
