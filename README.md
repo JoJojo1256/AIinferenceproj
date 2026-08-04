@@ -3,6 +3,7 @@
 This project implements speculative decoding on top of Hugging Face Transformers, verifies that it preserves the target model's behavior, and measures when draft-model speculation improves or hurts inference performance.
 
 The implementation is being developed in phases. See [`PROJECT.md`](PROJECT.md) for the complete build specification and definitions of done.
+See [`GPU_ACCESS.md`](GPU_ACCESS.md) for Oscar and standalone Linux GPU workflows.
 
 ## Current status
 

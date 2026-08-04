@@ -17,3 +17,4 @@ results/profiles/*
 !results/raw/.gitkeep
 !results/logs/.gitkeep
 !results/profiles/.gitkeep
+analysis/gpu-access-notes.md
