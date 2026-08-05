@@ -45,7 +45,7 @@ class IncrementModel(torch.nn.Module):
             device=input_ids.device,
         )
         logits.scatter_(2, next_ids.unsqueeze(-1), 100.0)
-        return SimpleNamespace(logits=logits)
+        return SimpleNamespace(logits=logits, past_key_values=None)
 
 
 def make_bundle(model_id: str, *, increment: int = 1) -> ModelBundle:

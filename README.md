@@ -7,7 +7,7 @@ See [`GPU_ACCESS.md`](GPU_ACCESS.md) for Oscar and standalone Linux GPU workflow
 
 ## Current status
 
-Phase 0 is scaffolded, and Phase 1 implements draft proposal, batched target verification, modified rejection sampling, corrected-token resampling, greedy decoding, and acceptance-rate logging. Oscar GPU runs are still required to produce the baseline and full-model speculative results.
+Phases 0 and 1 implement the reusable benchmark harness, draft proposal, batched target verification, modified rejection sampling, corrected-token resampling, greedy decoding, and acceptance-rate logging. Phase 2 now includes deterministic greedy-equality and sampled-distribution regression tests using local toy models. Oscar GPU runs are still required to validate correctness with the full Llama model pair and produce benchmark results.
 
 ## Oscar quick start
 
@@ -15,6 +15,7 @@ Phase 0 is scaffolded, and Phase 1 implements draft proposal, batched target ver
 git clone https://github.com/JoJojo1256/AIinferenceproj.git
 cd AIinferenceproj
 
+# The exploratory account permits four CPU cores and standard GPUs.
 # Build the environment from an Ampere GPU compute node, not a login node.
 interact -q gpu -g 1 -f ampere -m 40g -n 4
 bash env/setup.sh
