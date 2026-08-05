@@ -12,6 +12,8 @@ build/
 *.out
 *.err
 results/raw/*.json
+results/raw/*.jsonl
+bench/results/
 results/logs/*
 results/profiles/*
 !results/raw/.gitkeep
