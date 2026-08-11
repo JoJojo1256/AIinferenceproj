@@ -1,4 +1,4 @@
-from specdec.harness import run_benchmark
+from specdec.harness import run_benchmark, write_results
 from specdec.metrics import (
     GenerationMetrics,
     SpeculativeGenerationMetrics,
@@ -48,3 +48,13 @@ def test_harness_summarizes_speculative_acceptance() -> None:
     assert results["summary"]["accepted_tokens"] == 6
     assert results["summary"]["acceptance_rate"] == 0.75
     assert results["summary"]["target_forward_passes"] == 4
+
+
+def test_write_results_replaces_output_without_leaving_checkpoint(tmp_path) -> None:
+    output = tmp_path / "results.json"
+    output.write_text('{"old": true}\n', encoding="utf-8")
+
+    write_results({"new": True}, output)
+
+    assert output.read_text(encoding="utf-8") == '{\n  "new": true\n}\n'
+    assert not (tmp_path / "results.json.tmp").exists()

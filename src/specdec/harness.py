@@ -100,5 +100,7 @@ def run_benchmark(
 def write_results(results: dict[str, Any], output_path: str | Path) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(path)
     return path
