@@ -13,9 +13,10 @@ export HF_TOKEN="<read-only-token>"
 sbatch scripts/slurm_baseline.sh
 sbatch scripts/slurm_specdec.sh
 sbatch scripts/slurm_sweep.sh
+sbatch scripts/slurm_cached_smoke.sh
 ```
 
-The target 8B model plus 1B draft should be attempted first on a 24 GB Ampere GPU. The 3B draft may require more VRAM. Store the repository, Hugging Face cache, and raw results under `~/scratch`; copy important results off Oscar before the 48-hour exploratory allocation expires.
+The target 8B model plus 1B draft should be attempted first on a 24 GB Ampere GPU. `slurm_cached_smoke.sh` gates the corrected implementation on code and QA with `k=3/4/5`, three warmups, and five trials. The 3B draft may require more VRAM. Store the repository, Hugging Face cache, and raw results under `~/scratch`; copy important results off Oscar before the 48-hour exploratory allocation expires.
 
 ## Alternative: standalone Linux CUDA host
 

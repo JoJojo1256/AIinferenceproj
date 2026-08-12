@@ -7,7 +7,7 @@ See [`GPU_ACCESS.md`](GPU_ACCESS.md) for Oscar and standalone Linux GPU workflow
 
 ## Current status
 
-Phases 0 and 1 implement the reusable benchmark harness, draft proposal, batched target verification, modified rejection sampling, corrected-token resampling, greedy decoding, and acceptance-rate logging. Phase 2 includes deterministic greedy-equality and sampled-distribution regression tests using local toy models. The Phase 3 runner sweeps draft models, workloads, and speculation lengths and the analysis script generates the four required performance figures. Oscar GPU runs are still required to populate those figures with full Llama results.
+Phases 0 and 1 implement the reusable benchmark harness, draft proposal, batched target verification, modified rejection sampling, corrected-token resampling, greedy decoding, and acceptance-rate logging. Phase 2 includes deterministic greedy-equality and sampled-distribution regression tests using local toy models. The Phase 3 A40 sweep found every original speculative configuration slower than baseline because both models repeatedly processed the full prefix. Speculative generation now prefills each model once, carries persistent KV caches, verifies only new proposals, and explicitly crops and repairs both caches after rejection. The original Phase 3 figures remain the honest uncached result.
 
 ## Oscar quick start
 
@@ -24,6 +24,7 @@ export HF_TOKEN="<your-token>"
 sbatch scripts/slurm_baseline.sh
 sbatch scripts/slurm_specdec.sh
 sbatch scripts/slurm_sweep.sh
+sbatch scripts/slurm_cached_smoke.sh
 ```
 
 Accept the applicable Llama licenses on Hugging Face before submitting the job. The free account without a PI has no persistent `~/data` directory, so copy important raw results out of `~/scratch`. Never commit the token or model weights.
@@ -35,3 +36,20 @@ python analysis/make_figures.py results/raw/phase3_sweep_*.json
 ```
 
 `env/setup.sh` loads Oscar's Python 3.11 module by default. Set `PYTHON_MODULE` before running it if Oscar replaces that module version.
+
+The gated cached rerun uses the 1B draft, code and QA workloads, `k=3/4/5`,
+three warmups, and five measured trials:
+
+```bash
+python -u experiments/run_sweep.py \
+  --draft-model meta-llama/Llama-3.2-1B-Instruct \
+  --workload code --workload qa \
+  --speculation-length 3 --speculation-length 4 --speculation-length 5 \
+  --dtype bfloat16 --max-new-tokens 128 \
+  --warmup-runs 3 --trials 5 \
+  --output results/raw/cached_specdec_smoke.json
+```
+
+Speculative result JSON retains the original acceptance and block metrics and
+adds prefill, draft-proposal, target-verification, sampling/overhead, and
+target/draft processed-token totals.

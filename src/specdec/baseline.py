@@ -8,6 +8,14 @@ from specdec.metrics import GenerationMetrics
 from specdec.models import ModelBundle, encode_prompt
 
 
+def _termination_token_ids(bundle: ModelBundle) -> set[int]:
+    token_ids = {bundle.tokenizer.eos_token_id}
+    end_of_turn_id = bundle.tokenizer.get_vocab().get("<|eot_id|>")
+    if end_of_turn_id is not None:
+        token_ids.add(end_of_turn_id)
+    return {token_id for token_id in token_ids if token_id is not None}
+
+
 def _synchronize(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -55,9 +63,9 @@ def generate_baseline(
 
     output_ids.append(int(next_token.item()))
     past_key_values = outputs.past_key_values
-    eos_token_id = tokenizer.eos_token_id
+    termination_token_ids = _termination_token_ids(bundle)
 
-    while len(output_ids) < max_new_tokens and output_ids[-1] != eos_token_id:
+    while len(output_ids) < max_new_tokens and output_ids[-1] not in termination_token_ids:
         attention_mask = torch.cat(
             (attention_mask, torch.ones((attention_mask.shape[0], 1), device=device, dtype=attention_mask.dtype)),
             dim=1,

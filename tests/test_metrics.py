@@ -40,6 +40,12 @@ def test_harness_summarizes_speculative_acceptance() -> None:
             accepted_tokens=3,
             target_forward_passes=2,
             block_latencies_ms=[2.0],
+            prefill_time_ms=0.5,
+            draft_proposal_time_ms=0.4,
+            target_verification_time_ms=0.8,
+            sampling_overhead_time_ms=0.3,
+            target_processed_tokens=8,
+            draft_processed_tokens=10,
         )
 
     results = run_benchmark(generate, ["prompt"], warmup_runs=0, trials=2, seed=1)
@@ -48,6 +54,11 @@ def test_harness_summarizes_speculative_acceptance() -> None:
     assert results["summary"]["accepted_tokens"] == 6
     assert results["summary"]["acceptance_rate"] == 0.75
     assert results["summary"]["target_forward_passes"] == 4
+    assert results["summary"]["target_processed_tokens"] == 16
+    assert results["summary"]["draft_processed_tokens"] == 20
+    assert results["summary"]["draft_proposal_time_ms"] == 0.8
+    assert results["summary"]["target_verification_time_ms"] == 1.6
+    assert results["summary"]["sampling_overhead_time_ms"] == 0.6
 
 
 def test_write_results_replaces_output_without_leaving_checkpoint(tmp_path) -> None:

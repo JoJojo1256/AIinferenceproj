@@ -38,6 +38,12 @@ class SpeculativeGenerationMetrics(GenerationMetrics):
     accepted_tokens: int
     target_forward_passes: int
     block_latencies_ms: list[float]
+    prefill_time_ms: float = 0.0
+    draft_proposal_time_ms: float = 0.0
+    target_verification_time_ms: float = 0.0
+    sampling_overhead_time_ms: float = 0.0
+    target_processed_tokens: int = 0
+    draft_processed_tokens: int = 0
 
     @property
     def acceptance_rate(self) -> float:

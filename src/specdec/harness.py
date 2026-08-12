@@ -81,6 +81,24 @@ def run_benchmark(
                 "target_forward_passes": sum(
                     trial.target_forward_passes for trial in speculative_trials
                 ),
+                "target_processed_tokens": sum(
+                    trial.target_processed_tokens for trial in speculative_trials
+                ),
+                "draft_processed_tokens": sum(
+                    trial.draft_processed_tokens for trial in speculative_trials
+                ),
+                "prefill_time_ms": sum(
+                    trial.prefill_time_ms for trial in speculative_trials
+                ),
+                "draft_proposal_time_ms": sum(
+                    trial.draft_proposal_time_ms for trial in speculative_trials
+                ),
+                "target_verification_time_ms": sum(
+                    trial.target_verification_time_ms for trial in speculative_trials
+                ),
+                "sampling_overhead_time_ms": sum(
+                    trial.sampling_overhead_time_ms for trial in speculative_trials
+                ),
             }
         )
 
