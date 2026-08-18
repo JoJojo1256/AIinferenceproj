@@ -27,6 +27,7 @@ sbatch scripts/slurm_specdec.sh
 sbatch scripts/slurm_sweep.sh
 sbatch scripts/slurm_cached_smoke.sh
 sbatch scripts/slurm_optimized_smoke.sh
+sbatch scripts/slurm_gpu_equality.sh
 ```
 
 Accept the applicable Llama licenses on Hugging Face before submitting the job. The free account without a PI has no persistent `~/data` directory, so copy important raw results out of `~/scratch`. Never commit the token or model weights.
@@ -77,3 +78,22 @@ block lengths, mean/median realized `k`, stage timings, and processed-token
 counts. Submit `scripts/slurm_optimized_smoke.sh` for the baseline, eager
 DynamicCache control, compiled StaticCache fixed-`k`, and compiled StaticCache
 adaptive attribution matrix.
+
+The real-model CUDA correctness gate runs baseline, eager DynamicCache,
+compiled StaticCache, and compiled StaticCache plus adaptive speculation over
+eight code/QA prompts. It profiles a replay and fails if no CUDA graph launch
+is observed, checks cloned output-buffer lifetime directly, repeats each
+compiled generation three times, and compares sampled first-token
+distributions:
+
+```bash
+sbatch scripts/slurm_gpu_equality.sh
+```
+
+The deliberate negative control disables compiled-logit cloning and is
+expected to fail the job. The output distinguishes observed alias corruption
+from a negative control that did not reproduce buffer reuse:
+
+```bash
+NO_CLONE_LOGITS=1 sbatch scripts/slurm_gpu_equality.sh
+```
