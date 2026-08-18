@@ -1,9 +1,16 @@
 import pytest
 import torch
 from transformers import BatchEncoding, LlamaConfig, LlamaForCausalLM
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import DynamicCache, StaticCache
 
-from specdec.cache import cache_sequence_length, crop_cache, require_kv_cache
+from specdec.cache import (
+    CacheState,
+    cache_position,
+    cache_sequence_length,
+    crop_cache,
+    require_kv_cache,
+    rollback_cache_state,
+)
 from specdec.baseline import generate_baseline
 from specdec.models import ModelBundle
 from specdec.speculative import generate_speculative
@@ -34,6 +41,36 @@ def test_legacy_cache_crop_preserves_prefix() -> None:
 
     assert cache_sequence_length(cropped) == 2
     assert torch.equal(cropped[0][0], key[..., :2, :])
+
+
+def test_static_cache_rollback_clears_rejected_slots_and_reuses_positions() -> None:
+    config = LlamaConfig(
+        hidden_size=1,
+        intermediate_size=4,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=8,
+    )
+    cache = StaticCache(config, max_batch_size=1, max_cache_len=8)
+    key, value = _states(5)
+    cache.update(
+        key,
+        value,
+        layer_idx=0,
+        cache_kwargs={"cache_position": torch.arange(5)},
+    )
+
+    rolled_back = rollback_cache_state(CacheState(cache, 5), 3)
+
+    assert rolled_back.cache is cache
+    assert rolled_back.sequence_length == 3
+    assert torch.equal(cache.key_cache[0][..., :3, :], key[..., :3, :])
+    assert torch.count_nonzero(cache.key_cache[0][..., 3:, :]) == 0
+    assert torch.equal(
+        cache_position(rolled_back, 2, torch.device("cpu")),
+        torch.tensor([3, 4]),
+    )
 
 
 def test_cache_helpers_reject_missing_or_unknown_cache() -> None:
@@ -119,3 +156,39 @@ def test_tiny_llama_dynamic_cache_matches_greedy_baseline() -> None:
     assert speculative.output_token_ids == baseline.output_token_ids
     assert speculative.target_processed_tokens <= 2 + 4
     assert speculative.draft_processed_tokens <= 2 + 4
+
+
+def test_tiny_llama_static_cache_matches_greedy_baseline() -> None:
+    torch.manual_seed(11)
+    source = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=8,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            max_position_embeddings=32,
+        )
+    )
+    state_dict = source.state_dict()
+
+    baseline = generate_baseline(
+        _tiny_llama_bundle("target", state_dict),
+        "prompt",
+        max_new_tokens=4,
+        temperature=0,
+    )
+    speculative = generate_speculative(
+        _tiny_llama_bundle("target", state_dict),
+        _tiny_llama_bundle("draft", state_dict),
+        "prompt",
+        max_new_tokens=4,
+        speculation_length=2,
+        temperature=0,
+        draft_cache_implementation="static",
+        target_cache_implementation="static",
+        static_cache_max_length=8,
+    )
+
+    assert speculative.output_token_ids == baseline.output_token_ids

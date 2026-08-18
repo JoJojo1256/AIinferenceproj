@@ -47,6 +47,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-runs", type=int, default=3)
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--compile-draft", action="store_true")
+    parser.add_argument(
+        "--draft-cache-implementation",
+        choices=("dynamic", "static"),
+        default="dynamic",
+    )
+    parser.add_argument(
+        "--target-cache-implementation",
+        choices=("dynamic", "static"),
+        default="dynamic",
+    )
+    parser.add_argument("--static-cache-max-length", type=int)
+    parser.add_argument("--adaptive-speculation", action="store_true")
+    parser.add_argument("--max-speculation-length", type=int)
     parser.add_argument("--cache-dir", default=os.environ.get("HF_HOME"))
     parser.add_argument("--output")
     return parser.parse_args()
@@ -69,6 +83,21 @@ def main() -> None:
     speculation_lengths = args.speculation_lengths or list(DEFAULT_SPECULATION_LENGTHS)
     if any(length < 1 for length in speculation_lengths):
         raise ValueError("speculation lengths must be at least 1")
+    if args.compile_draft and args.draft_cache_implementation != "static":
+        raise ValueError("--compile-draft requires --draft-cache-implementation static")
+    if args.compile_draft and args.static_cache_max_length is None:
+        raise ValueError("--compile-draft requires --static-cache-max-length")
+    if args.compile_draft and args.warmup_runs < 1:
+        raise ValueError("--compile-draft requires at least one warmup run")
+    if args.static_cache_max_length is not None and args.static_cache_max_length < 1:
+        raise ValueError("--static-cache-max-length must be at least 1")
+    if args.max_speculation_length is not None:
+        if args.max_speculation_length < 1:
+            raise ValueError("--max-speculation-length must be at least 1")
+        if any(length > args.max_speculation_length for length in speculation_lengths):
+            raise ValueError(
+                "speculation lengths cannot exceed --max-speculation-length"
+            )
 
     timestamp = datetime.now(UTC)
     sweep_id = timestamp.strftime("%Y%m%dT%H%M%SZ")
@@ -85,7 +114,7 @@ def main() -> None:
         token=token,
     )
     results: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "sweep_id": sweep_id,
         "provenance": collect_provenance(),
         "experiment": {
@@ -103,6 +132,12 @@ def main() -> None:
             "warmup_runs": args.warmup_runs,
             "trials": args.trials,
             "seed": args.seed,
+            "compile_draft": args.compile_draft,
+            "draft_cache_implementation": args.draft_cache_implementation,
+            "target_cache_implementation": args.target_cache_implementation,
+            "static_cache_max_length": args.static_cache_max_length,
+            "adaptive_speculation": args.adaptive_speculation,
+            "max_speculation_length": args.max_speculation_length,
         },
         "runs": [],
     }
@@ -169,6 +204,12 @@ def main() -> None:
                         speculation_length=speculation_length,
                         temperature=args.temperature,
                         seed=seed,
+                        compile_draft=args.compile_draft,
+                        draft_cache_implementation=args.draft_cache_implementation,
+                        target_cache_implementation=args.target_cache_implementation,
+                        adaptive_speculation=args.adaptive_speculation,
+                        max_speculation_length=args.max_speculation_length,
+                        static_cache_max_length=args.static_cache_max_length,
                     )
 
                 speculative_results = run_benchmark(
@@ -193,6 +234,20 @@ def main() -> None:
                             "max_new_tokens": args.max_new_tokens,
                             "speculation_length": speculation_length,
                             "temperature": args.temperature,
+                            "compile_draft": args.compile_draft,
+                            "draft_cache_implementation": (
+                                args.draft_cache_implementation
+                            ),
+                            "target_cache_implementation": (
+                                args.target_cache_implementation
+                            ),
+                            "static_cache_max_length": (
+                                args.static_cache_max_length
+                            ),
+                            "adaptive_speculation": args.adaptive_speculation,
+                            "max_speculation_length": (
+                                args.max_speculation_length
+                            ),
                         },
                         comparison_id=f"{sweep_id}:{workload}",
                     )

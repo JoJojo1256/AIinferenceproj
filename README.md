@@ -21,10 +21,12 @@ interact -q gpu -g 1 -f ampere -m 40g -n 4
 bash env/setup.sh
 
 export HF_TOKEN="<your-token>"
+export HF_HOME="$HOME/scratch/hf_cache"
 sbatch scripts/slurm_baseline.sh
 sbatch scripts/slurm_specdec.sh
 sbatch scripts/slurm_sweep.sh
 sbatch scripts/slurm_cached_smoke.sh
+sbatch scripts/slurm_optimized_smoke.sh
 ```
 
 Accept the applicable Llama licenses on Hugging Face before submitting the job. The free account without a PI has no persistent `~/data` directory, so copy important raw results out of `~/scratch`. Never commit the token or model weights.
@@ -53,3 +55,25 @@ python -u experiments/run_sweep.py \
 Speculative result JSON retains the original acceptance and block metrics and
 adds prefill, draft-proposal, target-verification, sampling/overhead, and
 target/draft processed-token totals.
+
+## Draft decode optimization attribution
+
+The optimized path keeps fixed-`k`, eager execution, and `DynamicCache` as the
+defaults so historical results remain comparable. The new options are:
+
+- `--compile-draft`: compiles only the draft model's one-token decode forward
+  with `torch.compile(mode="reduce-overhead")`. It requires draft
+  `StaticCache`, a fixed `--static-cache-max-length`, and at least one warmup.
+- `--draft-cache-implementation static`: uses an explicitly positioned,
+  fixed-capacity draft cache. `--target-cache-implementation static` is
+  separate and opt-in because preallocating the 8B target cache consumes
+  additional VRAM on a 24 GB RTX 3090.
+- `--adaptive-speculation`: starts at `--speculation-length`, increases `k` by
+  two after full acceptance, and decreases it by one after rejection with a
+  floor of one. `--max-speculation-length` optionally caps growth.
+
+Each speculative trial records these switches, the initial `k`, all realized
+block lengths, mean/median realized `k`, stage timings, and processed-token
+counts. Submit `scripts/slurm_optimized_smoke.sh` for the baseline, eager
+DynamicCache control, compiled StaticCache fixed-`k`, and compiled StaticCache
+adaptive attribution matrix.

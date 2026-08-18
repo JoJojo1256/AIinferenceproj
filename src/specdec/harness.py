@@ -11,7 +11,12 @@ from typing import Any
 import torch
 import transformers
 
-from specdec.metrics import GenerationMetrics, SpeculativeGenerationMetrics, summarize_trials
+from specdec.metrics import (
+    GenerationMetrics,
+    SpeculativeGenerationMetrics,
+    percentile,
+    summarize_trials,
+)
 
 GenerateFunction = Callable[[str, int], GenerationMetrics]
 
@@ -73,6 +78,12 @@ def run_benchmark(
     if speculative_trials:
         proposed_tokens = sum(trial.proposed_tokens for trial in speculative_trials)
         accepted_tokens = sum(trial.accepted_tokens for trial in speculative_trials)
+        realized_speculation_lengths = [
+            length
+            for trial in speculative_trials
+            for length in (trial.realized_speculation_lengths or [])
+        ]
+        first_speculative = speculative_trials[0]
         summary.update(
             {
                 "proposed_tokens": proposed_tokens,
@@ -98,6 +109,26 @@ def run_benchmark(
                 ),
                 "sampling_overhead_time_ms": sum(
                     trial.sampling_overhead_time_ms for trial in speculative_trials
+                ),
+                "draft_compiled": first_speculative.draft_compiled,
+                "draft_cache_implementation": (
+                    first_speculative.draft_cache_implementation
+                ),
+                "target_cache_implementation": (
+                    first_speculative.target_cache_implementation
+                ),
+                "adaptive_speculation": first_speculative.adaptive_speculation,
+                "initial_speculation_length": (
+                    first_speculative.initial_speculation_length
+                ),
+                "realized_speculation_length_mean": (
+                    sum(realized_speculation_lengths) / len(realized_speculation_lengths)
+                    if realized_speculation_lengths
+                    else 0.0
+                ),
+                "realized_speculation_length_median": percentile(
+                    realized_speculation_lengths,
+                    50,
                 ),
             }
         )

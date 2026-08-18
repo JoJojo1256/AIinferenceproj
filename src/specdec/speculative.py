@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import torch
+from transformers.cache_utils import StaticCache
 
 from specdec.cache import (
-    KVCache,
-    cache_sequence_length,
-    crop_cache,
+    CacheImplementation,
+    CacheState,
+    advance_cache_state,
+    cache_position,
+    model_attention_mask,
     require_kv_cache,
-    validate_cache_length,
+    rollback_cache_state,
+    validate_cache_state,
 )
 from specdec.metrics import SpeculativeGenerationMetrics
 from specdec.models import ModelBundle, encode_prompt, validate_shared_tokenizer
@@ -23,7 +28,7 @@ from specdec.sampling import (
 
 @dataclass(frozen=True)
 class CachedModelState:
-    past_key_values: KVCache
+    cache_state: CacheState
     next_logits: torch.Tensor
 
 
@@ -33,6 +38,9 @@ class DraftProposal:
     probabilities: list[torch.Tensor]
     state: CachedModelState
     processed_tokens: int
+
+
+ModelForward = Callable[..., Any]
 
 
 @dataclass
@@ -112,33 +120,110 @@ def _select_token(
     return sample_distribution(probabilities, generator=generator), probabilities
 
 
+def next_adaptive_speculation_length(
+    current_length: int,
+    *,
+    all_tokens_accepted: bool,
+    max_length: int | None = None,
+) -> int:
+    if current_length < 1:
+        raise ValueError("Current speculation length must be at least 1")
+    if max_length is not None and max_length < 1:
+        raise ValueError("Maximum speculation length must be at least 1")
+    if all_tokens_accepted:
+        next_length = current_length + 2
+        return min(next_length, max_length) if max_length is not None else next_length
+    return max(1, current_length - 1)
+
+
+def compile_draft_forward(draft: ModelBundle) -> ModelForward:
+    cached = draft.model.__dict__.get("_specdec_compiled_forward")
+    if cached is not None:
+        return cached
+    compiled = torch.compile(draft.model.forward, mode="reduce-overhead")
+    draft.model.__dict__["_specdec_compiled_forward"] = compiled
+    return compiled
+
+
+def _reusable_static_cache(
+    bundle: ModelBundle,
+    *,
+    max_cache_length: int,
+    device: torch.device,
+) -> StaticCache:
+    if max_cache_length < 1:
+        raise ValueError("Static cache length must be at least 1")
+    config = getattr(bundle.model, "config", None)
+    if config is None:
+        raise TypeError("StaticCache requires a model with a Transformers config")
+    dtype = next(bundle.model.parameters()).dtype
+    cache_key = (max_cache_length, str(device), dtype)
+    cache_pool = bundle.model.__dict__.setdefault("_specdec_static_caches", {})
+    cache = cache_pool.get(cache_key)
+    if cache is None:
+        cache = StaticCache(
+            config=config,
+            max_batch_size=1,
+            max_cache_len=max_cache_length,
+            device=device,
+            dtype=dtype,
+        )
+        cache_pool[cache_key] = cache
+    else:
+        cache.reset()
+    return cache
+
+
 def _prefill_model(
     bundle: ModelBundle,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    *,
+    cache_implementation: CacheImplementation,
+    max_cache_length: int,
 ) -> CachedModelState:
+    if cache_implementation == "static":
+        initial_cache: object | None = _reusable_static_cache(
+            bundle,
+            max_cache_length=max_cache_length,
+            device=input_ids.device,
+        )
+        initial_state = CacheState(require_kv_cache(initial_cache), 0)
+        forward_attention_mask = model_attention_mask(initial_state, attention_mask)
+    elif cache_implementation == "dynamic":
+        initial_cache = None
+        forward_attention_mask = attention_mask
+    else:
+        raise ValueError(f"Unsupported cache implementation {cache_implementation!r}")
+
     outputs = bundle.model(
         input_ids=input_ids,
-        attention_mask=attention_mask,
+        attention_mask=forward_attention_mask,
+        past_key_values=initial_cache,
         use_cache=True,
+        cache_position=torch.arange(input_ids.shape[1], device=input_ids.device),
     )
     cache = require_kv_cache(getattr(outputs, "past_key_values", None))
-    validate_cache_length(cache, input_ids.shape[1])
+    cache_state = CacheState(cache, input_ids.shape[1])
+    validate_cache_state(cache_state, input_ids.shape[1])
     return CachedModelState(
-        past_key_values=cache,
+        cache_state=cache_state,
         next_logits=outputs.logits[0, -1],
     )
 
 
 def _advance_model(
     bundle: ModelBundle,
-    cache: KVCache,
+    state: CachedModelState,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    *,
+    forward: ModelForward | None = None,
+    clone_logits: bool = False,
 ) -> tuple[CachedModelState, torch.Tensor]:
     if input_ids.ndim != 2 or input_ids.shape[0] != 1 or input_ids.shape[1] < 1:
         raise ValueError("Cached model input must contain at least one token for one sequence")
-    previous_length = cache_sequence_length(cache)
+    previous_length = state.cache_state.sequence_length
     expected_length = previous_length + input_ids.shape[1]
     if attention_mask.shape != (1, expected_length):
         raise ValueError(
@@ -146,20 +231,33 @@ def _advance_model(
             f"cached sequence length {expected_length}"
         )
 
-    outputs = bundle.model(
+    model_forward = forward if forward is not None else bundle.model
+    outputs = model_forward(
         input_ids=input_ids,
-        attention_mask=attention_mask,
-        past_key_values=cache,
+        attention_mask=model_attention_mask(state.cache_state, attention_mask),
+        past_key_values=state.cache_state.cache,
         use_cache=True,
+        cache_position=cache_position(
+            state.cache_state,
+            input_ids.shape[1],
+            input_ids.device,
+        ),
     )
-    updated_cache = require_kv_cache(getattr(outputs, "past_key_values", None))
-    validate_cache_length(updated_cache, expected_length)
+    updated_cache_state = advance_cache_state(
+        state.cache_state,
+        getattr(outputs, "past_key_values", None),
+        input_ids.shape[1],
+    )
+    validate_cache_state(updated_cache_state, expected_length)
     logits = outputs.logits[0]
+    if clone_logits:
+        # reduce-overhead/CUDA graphs reuse output buffers across replay.
+        logits = logits.clone()
     if logits.shape[0] != input_ids.shape[1]:
         raise RuntimeError("Model must return one logits row per incremental input token")
     return (
         CachedModelState(
-            past_key_values=updated_cache,
+            cache_state=updated_cache_state,
             next_logits=logits[-1],
         ),
         logits,
@@ -175,6 +273,8 @@ def propose_tokens(
     speculation_length: int,
     temperature: float,
     generator: torch.Generator | None,
+    forward: ModelForward | None = None,
+    clone_logits: bool = False,
 ) -> DraftProposal:
     if speculation_length < 1:
         raise ValueError("speculation_length must be at least 1")
@@ -202,9 +302,11 @@ def propose_tokens(
         staged_attention_mask = _append_attention_tokens(staged_attention_mask, 1)
         staged_state, _ = _advance_model(
             draft,
-            staged_state.past_key_values,
+            staged_state,
             model_input_ids,
             staged_attention_mask,
+            forward=forward,
+            clone_logits=clone_logits,
         )
         processed_tokens += 1
         if token_id in termination_token_ids:
@@ -228,6 +330,12 @@ def generate_speculative(
     speculation_length: int = 4,
     temperature: float = 0.0,
     seed: int = 0,
+    compile_draft: bool = False,
+    draft_cache_implementation: CacheImplementation = "dynamic",
+    target_cache_implementation: CacheImplementation = "dynamic",
+    adaptive_speculation: bool = False,
+    max_speculation_length: int | None = None,
+    static_cache_max_length: int | None = None,
 ) -> SpeculativeGenerationMetrics:
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be at least 1")
@@ -235,6 +343,22 @@ def generate_speculative(
         raise ValueError("speculation_length must be at least 1")
     if temperature < 0:
         raise ValueError("temperature must be non-negative")
+    if draft_cache_implementation not in {"dynamic", "static"}:
+        raise ValueError("draft_cache_implementation must be 'dynamic' or 'static'")
+    if target_cache_implementation not in {"dynamic", "static"}:
+        raise ValueError("target_cache_implementation must be 'dynamic' or 'static'")
+    if compile_draft and draft_cache_implementation != "static":
+        raise ValueError("Compiled draft decoding requires draft_cache_implementation='static'")
+    if compile_draft and static_cache_max_length is None:
+        raise ValueError(
+            "Compiled draft decoding requires an explicit static_cache_max_length "
+            "to keep decode shapes fixed across warmup and measured runs"
+        )
+    if max_speculation_length is not None:
+        if max_speculation_length < 1:
+            raise ValueError("max_speculation_length must be at least 1")
+        if speculation_length > max_speculation_length:
+            raise ValueError("speculation_length cannot exceed max_speculation_length")
 
     validate_shared_tokenizer(target, draft)
     target_device = _model_device(target)
@@ -245,6 +369,13 @@ def generate_speculative(
     encoded = encode_prompt(target.tokenizer, prompt, target_device)
     input_ids = encoded["input_ids"]
     attention_mask = encoded["attention_mask"]
+    required_cache_length = input_ids.shape[1] + max_new_tokens
+    resolved_static_cache_length = static_cache_max_length or required_cache_length
+    if resolved_static_cache_length < required_cache_length:
+        raise ValueError(
+            f"static_cache_max_length={resolved_static_cache_length} is smaller than "
+            f"the required prompt + generation length {required_cache_length}"
+        )
     generator = torch.Generator(device=target_device).manual_seed(seed)
     termination_token_ids = _termination_token_ids(target)
     output_ids: list[int] = []
@@ -259,12 +390,27 @@ def generate_speculative(
     target_verification_time_ms = 0.0
     sampling_overhead_time_ms = 0.0
     pending_token_id: int | None = None
+    current_speculation_length = speculation_length
+    realized_speculation_lengths: list[int] = []
+    draft_forward = compile_draft_forward(draft) if compile_draft else None
 
     _synchronize(target_device)
     total_start = time.perf_counter()
     prefill_timer = _StageTimer.start(target_device)
-    target_state = _prefill_model(target, input_ids, attention_mask)
-    draft_state = _prefill_model(draft, input_ids, attention_mask)
+    target_state = _prefill_model(
+        target,
+        input_ids,
+        attention_mask,
+        cache_implementation=target_cache_implementation,
+        max_cache_length=resolved_static_cache_length,
+    )
+    draft_state = _prefill_model(
+        draft,
+        input_ids,
+        attention_mask,
+        cache_implementation=draft_cache_implementation,
+        max_cache_length=resolved_static_cache_length,
+    )
     prefill_timer.stop()
     _synchronize(target_device)
     prefill_time_ms = prefill_timer.elapsed_ms()
@@ -276,12 +422,12 @@ def generate_speculative(
         remaining = max_new_tokens - len(output_ids)
         committed_length = attention_mask.shape[1]
         pending_count = 1 if pending_token_id is not None else 0
-        validate_cache_length(
-            target_state.past_key_values,
+        validate_cache_state(
+            target_state.cache_state,
             committed_length - pending_count,
         )
-        validate_cache_length(
-            draft_state.past_key_values,
+        validate_cache_state(
+            draft_state.cache_state,
             committed_length - pending_count,
         )
         proposal_timer = _StageTimer.start(target_device)
@@ -293,20 +439,25 @@ def generate_speculative(
             )
             draft_state, _ = _advance_model(
                 draft,
-                draft_state.past_key_values,
+                draft_state,
                 pending_tensor,
                 attention_mask,
+                forward=draft_forward,
+                clone_logits=compile_draft,
             )
             draft_processed_tokens += 1
         proposal = propose_tokens(
             draft,
             draft_state,
             attention_mask,
-            speculation_length=min(speculation_length, remaining),
+            speculation_length=min(current_speculation_length, remaining),
             temperature=temperature,
             generator=generator,
+            forward=draft_forward,
+            clone_logits=compile_draft,
         )
         proposal_timer.stop()
+        realized_speculation_lengths.append(len(proposal.token_ids))
         proposed_tokens += len(proposal.token_ids)
         draft_processed_tokens += proposal.processed_tokens
         block_output_start = len(output_ids)
@@ -325,7 +476,7 @@ def generate_speculative(
         verification_timer = _StageTimer.start(target_device)
         verified_target_state, target_logits = _advance_model(
             target,
-            target_state.past_key_values,
+            target_state,
             target_input_ids,
             verification_attention_mask,
         )
@@ -375,22 +526,22 @@ def generate_speculative(
 
         if rejection_index is not None:
             retained_length = committed_length + rejection_index
-            target_cache = crop_cache(
-                verified_target_state.past_key_values,
+            target_cache_state = rollback_cache_state(
+                verified_target_state.cache_state,
                 retained_length,
             )
-            draft_cache = crop_cache(
-                proposal.state.past_key_values,
+            draft_cache_state = rollback_cache_state(
+                proposal.state.cache_state,
                 retained_length,
             )
             attention_mask = verification_attention_mask[:, :retained_length]
             attention_mask = _append_attention_tokens(attention_mask, 1)
             target_state = CachedModelState(
-                past_key_values=target_cache,
+                cache_state=target_cache_state,
                 next_logits=target_state.next_logits,
             )
             draft_state = CachedModelState(
-                past_key_values=draft_cache,
+                cache_state=draft_cache_state,
                 next_logits=draft_state.next_logits,
             )
             pending_token_id = output_ids[-1]
@@ -426,8 +577,15 @@ def generate_speculative(
         expected_cache_length = attention_mask.shape[1] - (
             1 if pending_token_id is not None else 0
         )
-        validate_cache_length(target_state.past_key_values, expected_cache_length)
-        validate_cache_length(draft_state.past_key_values, expected_cache_length)
+        validate_cache_state(target_state.cache_state, expected_cache_length)
+        validate_cache_state(draft_state.cache_state, expected_cache_length)
+
+        if adaptive_speculation:
+            current_speculation_length = next_adaptive_speculation_length(
+                current_speculation_length,
+                all_tokens_accepted=rejection_index is None,
+                max_length=max_speculation_length,
+            )
 
         _synchronize(target_device)
         block_latency_ms = (time.perf_counter() - block_start) * 1_000
@@ -470,4 +628,10 @@ def generate_speculative(
         sampling_overhead_time_ms=sampling_overhead_time_ms,
         target_processed_tokens=target_processed_tokens,
         draft_processed_tokens=draft_processed_tokens,
+        draft_compiled=compile_draft,
+        draft_cache_implementation=draft_cache_implementation,
+        target_cache_implementation=target_cache_implementation,
+        adaptive_speculation=adaptive_speculation,
+        initial_speculation_length=speculation_length,
+        realized_speculation_lengths=realized_speculation_lengths,
     )

@@ -46,6 +46,12 @@ def test_harness_summarizes_speculative_acceptance() -> None:
             sampling_overhead_time_ms=0.3,
             target_processed_tokens=8,
             draft_processed_tokens=10,
+            draft_compiled=True,
+            draft_cache_implementation="static",
+            target_cache_implementation="dynamic",
+            adaptive_speculation=True,
+            initial_speculation_length=3,
+            realized_speculation_lengths=[3, 5],
         )
 
     results = run_benchmark(generate, ["prompt"], warmup_runs=0, trials=2, seed=1)
@@ -59,6 +65,13 @@ def test_harness_summarizes_speculative_acceptance() -> None:
     assert results["summary"]["draft_proposal_time_ms"] == 0.8
     assert results["summary"]["target_verification_time_ms"] == 1.6
     assert results["summary"]["sampling_overhead_time_ms"] == 0.6
+    assert results["summary"]["draft_compiled"] is True
+    assert results["summary"]["draft_cache_implementation"] == "static"
+    assert results["summary"]["target_cache_implementation"] == "dynamic"
+    assert results["summary"]["adaptive_speculation"] is True
+    assert results["summary"]["initial_speculation_length"] == 3
+    assert results["summary"]["realized_speculation_length_mean"] == 4.0
+    assert results["summary"]["realized_speculation_length_median"] == 4.0
 
 
 def test_write_results_replaces_output_without_leaving_checkpoint(tmp_path) -> None:

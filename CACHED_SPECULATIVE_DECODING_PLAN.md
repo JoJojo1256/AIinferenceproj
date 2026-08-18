@@ -173,3 +173,45 @@ slow, report model-pair/hardware economics (draft latency or acceptance) as the
 remaining negative result. If Hugging Face is faster, profile Python launch
 overhead, attention backend, cache format/copies, and synchronization before
 changing the algorithm or claiming a speedup.
+
+## Draft decode optimization follow-up
+
+The cached RTX 3090 smoke run moved the bottleneck to the serial 1B draft
+proposal loop. Three independently recorded options target that bottleneck
+without changing modified rejection sampling:
+
+1. Compile the draft's one-token decode forward with
+   `torch.compile(mode="reduce-overhead")`. The compiled path clones logits
+   before the next replay because reduce-overhead CUDA graphs may reuse output
+   buffers.
+2. Use a fixed-capacity `StaticCache` for the draft, with explicit
+   `cache_position`, a padded fixed-shape attention mask, logical cache length,
+   rejected-slot clearing on rollback, and storage reuse across warmup and
+   measured generations so CUDA graphs see stable addresses. Target StaticCache
+   remains opt-in to avoid unnecessary 8B cache preallocation pressure on a
+   24 GB RTX 3090.
+3. Adapt `k` using the Transformers 4.53.1 assisted-generation heuristic:
+   increase by two after full proposal acceptance; otherwise decrease by one
+   with a floor of one and an optional upper bound.
+
+The implementation follows the installed Transformers 4.53.1 source:
+`StaticCache(config, max_batch_size, max_cache_len, device, dtype)` preallocates
+and marks layer tensors at static addresses, `update()` requires
+`cache_position`, and `get_seq_length()` scans nonzero slots rather than
+tracking a logical length. The local abstraction therefore owns logical length
+and does not use `get_seq_length()` to position or roll back StaticCache.
+
+`scripts/slurm_optimized_smoke.sh` runs the attribution matrix over code and QA
+with three warmups and five trials:
+
+1. target-only baseline;
+2. eager DynamicCache at fixed `k=5`;
+3. compiled draft StaticCache at fixed `k=5`;
+4. compiled draft StaticCache with adaptive `k`, starting at five and capped at
+   fifteen.
+
+The result schema records compile/cache/adaptive switches, initial and realized
+per-block `k`, mean/median realized `k`, existing stage timings, and processed
+token counts. Historical uncached Phase 3 and cached smoke files remain
+unchanged. Success remains at least one configuration above `1.0x` baseline
+throughput with all greedy and sampled correctness gates intact.

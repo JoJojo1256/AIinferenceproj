@@ -2,10 +2,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import BatchEncoding
+from transformers import BatchEncoding, LlamaConfig
+from transformers.cache_utils import StaticCache
 
 from specdec.models import ModelBundle
-from specdec.speculative import generate_speculative
+from specdec.speculative import (
+    _advance_model,
+    _prefill_model,
+    generate_speculative,
+    next_adaptive_speculation_length,
+)
 
 
 class FakeTokenizer:
@@ -51,22 +57,43 @@ class IncrementModel(torch.nn.Module):
         self.processed_tokens = 0
         self.input_lengths: list[int] = []
         self.cache_lengths_before: list[int] = []
+        self.static_cache_ids: list[int] = []
+        self.config = LlamaConfig(
+            vocab_size=vocab_size,
+            hidden_size=1,
+            intermediate_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            max_position_embeddings=64,
+        )
 
     def forward(
         self,
         input_ids: torch.Tensor,
         *,
-        past_key_values: tuple[tuple[torch.Tensor, torch.Tensor], ...] | None = None,
+        past_key_values: (
+            StaticCache | tuple[tuple[torch.Tensor, torch.Tensor], ...] | None
+        ) = None,
+        cache_position: torch.Tensor | None = None,
         use_cache: bool = False,
         **_: object,
     ) -> SimpleNamespace:
-        if past_key_values is None:
+        if isinstance(past_key_values, StaticCache):
+            if cache_position is None:
+                raise RuntimeError("StaticCache fake requires cache_position")
+            cached_length = int(cache_position[0].item())
             cached_ids = input_ids[:, :0]
+            self.static_cache_ids.append(id(past_key_values))
+        elif past_key_values is None:
+            cached_ids = input_ids[:, :0]
+            cached_length = 0
         else:
             cached_ids = past_key_values[0][0][:, 0, :, 0].to(dtype=input_ids.dtype)
+            cached_length = cached_ids.shape[1]
         self.processed_tokens += input_ids.shape[1]
         self.input_lengths.append(input_ids.shape[1])
-        self.cache_lengths_before.append(cached_ids.shape[1])
+        self.cache_lengths_before.append(cached_length)
 
         increments = torch.full_like(input_ids, self.increment)
         for token_id in self.wrong_after:
@@ -78,10 +105,35 @@ class IncrementModel(torch.nn.Module):
             device=input_ids.device,
         )
         logits.scatter_(2, next_ids.unsqueeze(-1), 100.0)
-        updated_ids = torch.cat((cached_ids, input_ids), dim=1)
-        key = updated_ids[:, None, :, None]
-        cache = ((key, key.clone()),) if use_cache else None
+        if isinstance(past_key_values, StaticCache):
+            states = input_ids[:, None, :, None].to(dtype=self.anchor.dtype)
+            past_key_values.update(
+                states,
+                states.clone(),
+                layer_idx=0,
+                cache_kwargs={"cache_position": cache_position},
+            )
+            cache = past_key_values if use_cache else None
+        else:
+            updated_ids = torch.cat((cached_ids, input_ids), dim=1)
+            key = updated_ids[:, None, :, None]
+            cache = ((key, key.clone()),) if use_cache else None
         return SimpleNamespace(logits=logits, past_key_values=cache)
+
+
+class ReusingOutputModel(IncrementModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.output_buffer: torch.Tensor | None = None
+
+    def forward(self, *args: object, **kwargs: object) -> SimpleNamespace:
+        outputs = super().forward(*args, **kwargs)
+        if self.output_buffer is None:
+            self.output_buffer = outputs.logits.clone()
+        else:
+            self.output_buffer.copy_(outputs.logits)
+        outputs.logits = self.output_buffer
+        return outputs
 
 
 def make_bundle(
@@ -259,3 +311,122 @@ def test_exact_max_token_boundary_does_not_emit_or_process_bonus() -> None:
     assert result.output_token_ids == [1, 2]
     assert target_model.input_lengths == [1, 2]
     assert result.target_processed_tokens == 3
+
+
+def test_static_cache_rejection_matches_dynamic_cache() -> None:
+    dynamic = generate_speculative(
+        make_bundle("target"),
+        make_bundle("draft", wrong_after={1}),
+        "prompt",
+        max_new_tokens=5,
+        speculation_length=3,
+        temperature=0,
+    )
+    static_target = make_bundle("target")
+    static_draft = make_bundle("draft", wrong_after={1})
+    static = generate_speculative(
+        static_target,
+        static_draft,
+        "prompt",
+        max_new_tokens=5,
+        speculation_length=3,
+        temperature=0,
+        draft_cache_implementation="static",
+        target_cache_implementation="static",
+        static_cache_max_length=8,
+    )
+
+    assert static.output_token_ids == dynamic.output_token_ids
+    assert static.accepted_tokens == dynamic.accepted_tokens
+    assert static_target.model.cache_lengths_before[:3] == [0, 1, 2]
+    assert 2 in static_draft.model.cache_lengths_before
+
+
+def test_static_cache_storage_is_reused_across_generation_calls() -> None:
+    target = make_bundle("target")
+    draft = make_bundle("draft")
+
+    for _ in range(2):
+        generate_speculative(
+            target,
+            draft,
+            "prompt",
+            max_new_tokens=4,
+            speculation_length=2,
+            temperature=0,
+            draft_cache_implementation="static",
+            static_cache_max_length=8,
+        )
+
+    assert len(set(draft.model.static_cache_ids)) == 1
+
+
+def test_compiled_output_rows_are_cloned_before_buffer_reuse() -> None:
+    model = ReusingOutputModel()
+    bundle = ModelBundle(
+        model=model,
+        tokenizer=FakeTokenizer(),
+        model_id="reusing",
+        revision=None,
+    )
+    input_ids = torch.tensor([[0]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    state = _prefill_model(
+        bundle,
+        input_ids,
+        attention_mask,
+        cache_implementation="dynamic",
+        max_cache_length=4,
+    )
+    first_state, first_logits = _advance_model(
+        bundle,
+        state,
+        torch.tensor([[1]]),
+        torch.ones((1, 2), dtype=torch.long),
+        forward=model.forward,
+        clone_logits=True,
+    )
+    retained_logits = first_logits
+
+    _advance_model(
+        bundle,
+        first_state,
+        torch.tensor([[2]]),
+        torch.ones((1, 3), dtype=torch.long),
+        forward=model.forward,
+        clone_logits=True,
+    )
+
+    assert int(torch.argmax(retained_logits[-1]).item()) == 2
+
+
+def test_adaptive_speculation_schedule_has_floor_and_bound() -> None:
+    assert next_adaptive_speculation_length(5, all_tokens_accepted=True) == 7
+    assert (
+        next_adaptive_speculation_length(
+            5,
+            all_tokens_accepted=True,
+            max_length=6,
+        )
+        == 6
+    )
+    assert next_adaptive_speculation_length(2, all_tokens_accepted=False) == 1
+    assert next_adaptive_speculation_length(1, all_tokens_accepted=False) == 1
+
+
+def test_adaptive_speculation_records_realized_block_lengths() -> None:
+    result = generate_speculative(
+        make_bundle("target", include_eot=False),
+        make_bundle("draft", include_eot=False),
+        "prompt",
+        max_new_tokens=10,
+        speculation_length=2,
+        temperature=0,
+        adaptive_speculation=True,
+        max_speculation_length=5,
+    )
+
+    assert result.output_token_ids == [1, 2, 3, 4, 5, 6, 7]
+    assert result.realized_speculation_lengths == [2, 4]
+    assert result.realized_speculation_length_mean == 3.0
+    assert result.realized_speculation_length_median == 3.0
