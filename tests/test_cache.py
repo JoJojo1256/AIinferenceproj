@@ -2,12 +2,14 @@ import pytest
 import torch
 from transformers import BatchEncoding, LlamaConfig, LlamaForCausalLM
 from transformers.cache_utils import DynamicCache, StaticCache
+from transformers.masking_utils import create_causal_mask
 
 from specdec.cache import (
     CacheState,
     cache_position,
     cache_sequence_length,
     crop_cache,
+    model_attention_mask,
     require_kv_cache,
     rollback_cache_state,
 )
@@ -71,6 +73,95 @@ def test_static_cache_rollback_clears_rejected_slots_and_reuses_positions() -> N
         cache_position(rolled_back, 2, torch.device("cpu")),
         torch.tensor([3, 4]),
     )
+
+
+def test_static_cache_consecutive_rejections_preserve_prefix_and_clear_stale_slots() -> None:
+    config = LlamaConfig(
+        hidden_size=1,
+        intermediate_size=4,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=12,
+    )
+    cache = StaticCache(config, max_batch_size=1, max_cache_len=12)
+    initial_states = torch.tensor([1.0, 2.0]).reshape(1, 1, 2, 1)
+    cache.update(
+        initial_states,
+        initial_states.clone(),
+        layer_idx=0,
+        cache_kwargs={"cache_position": torch.arange(2)},
+    )
+    first_verification = torch.arange(3.0, 8.0).reshape(1, 1, 5, 1)
+    cache.update(
+        first_verification,
+        first_verification.clone(),
+        layer_idx=0,
+        cache_kwargs={"cache_position": torch.arange(2, 7)},
+    )
+
+    first_rollback = rollback_cache_state(CacheState(cache, 7), 3)
+    fresh_after_first = StaticCache(config, max_batch_size=1, max_cache_len=12)
+    fresh_first_prefix = torch.tensor([1.0, 2.0, 3.0]).reshape(1, 1, 3, 1)
+    fresh_after_first.update(
+        fresh_first_prefix,
+        fresh_first_prefix.clone(),
+        layer_idx=0,
+        cache_kwargs={"cache_position": torch.arange(3)},
+    )
+    assert first_rollback.sequence_length == 3
+    assert torch.equal(
+        cache.key_cache[0][..., :3, :],
+        fresh_after_first.key_cache[0][..., :3, :],
+    )
+    assert torch.count_nonzero(cache.key_cache[0][..., 3:, :]) == 0
+
+    second_verification = torch.arange(8.0, 14.0).reshape(1, 1, 6, 1)
+    cache.update(
+        second_verification,
+        second_verification.clone(),
+        layer_idx=0,
+        cache_kwargs={"cache_position": torch.arange(3, 9)},
+    )
+    second_rollback = rollback_cache_state(CacheState(cache, 9), 4)
+    fresh_after_second = StaticCache(config, max_batch_size=1, max_cache_len=12)
+    fresh_second_prefix = torch.tensor([1.0, 2.0, 3.0, 8.0]).reshape(1, 1, 4, 1)
+    fresh_after_second.update(
+        fresh_second_prefix,
+        fresh_second_prefix.clone(),
+        layer_idx=0,
+        cache_kwargs={"cache_position": torch.arange(4)},
+    )
+
+    assert second_rollback.sequence_length == 4
+    assert torch.equal(
+        cache.key_cache[0][..., :4, :],
+        fresh_after_second.key_cache[0][..., :4, :],
+    )
+    assert torch.equal(
+        cache.value_cache[0][..., :4, :],
+        fresh_after_second.value_cache[0][..., :4, :],
+    )
+    assert torch.count_nonzero(cache.key_cache[0][..., 4:, :]) == 0
+    assert torch.count_nonzero(cache.value_cache[0][..., 4:, :]) == 0
+
+    padded_mask = model_attention_mask(
+        second_rollback,
+        torch.ones((1, 5), dtype=torch.long),
+    )
+    assert torch.equal(padded_mask[:, :5], torch.ones((1, 5), dtype=torch.long))
+    assert torch.count_nonzero(padded_mask[:, 5:]) == 0
+    causal_mask = create_causal_mask(
+        config=config,
+        input_embeds=torch.zeros((1, 1, 1)),
+        attention_mask=padded_mask,
+        cache_position=torch.tensor([4]),
+        past_key_values=cache,
+        position_ids=torch.tensor([[4]]),
+    )
+    assert causal_mask is not None
+    assert torch.count_nonzero(causal_mask[..., :5]) == 0
+    assert torch.all(causal_mask[..., 5:] == torch.finfo(torch.float32).min)
 
 
 def test_cache_helpers_reject_missing_or_unknown_cache() -> None:
