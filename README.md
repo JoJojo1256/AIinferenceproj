@@ -47,8 +47,8 @@ DTYPE=float32 sbatch scripts/slurm_gpu_equality.sh
 ```
 
 The original uncached figures are historical artifacts from commit `ecfa92c`;
-running today's `slurm_sweep.sh` uses the current cached implementation and
-does not recreate that old code path.
+running today's `scripts/slurm_sweep.sh` uses the current cached implementation
+and does not recreate that old code path.
 
 The optimized measurements reported below use 128 new tokens, three discarded
 warmups, five measured trials, and paired same-run target-only baselines.
@@ -58,8 +58,14 @@ settings, and realized speculation lengths. Generate the four summary plots
 with:
 
 ```bash
+# The measured JSONs live on the data branch rather than the code branch.
+git fetch origin jojojo1256-optimized-benchmarks
+git checkout origin/jojojo1256-optimized-benchmarks -- \
+  results/raw/phase3_sweep_optimized_20260818T215822Z.json \
+  results/raw/phase3_sweep_optimized_adaptive_20260818T215822Z.json
+
 python analysis/make_figures.py \
-  results/raw/optimized_fixed_sweep.json
+  results/raw/phase3_sweep_optimized_20260818T215822Z.json
 ```
 
 The adaptive JSON supplies the adaptive table and attribution discussion; the
