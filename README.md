@@ -150,23 +150,35 @@ same fixed target-token sequence two ways: one token per target forward versus
 all tokens in one forward. In bf16, those shapes choose different kernel and
 reduction paths; floating-point addition is non-associative, and near-tied
 logits can flip argmax. This target-only control produced six argmax flips
-across five prompts, proving that input shape alone can change bf16 greedy
-decisions without speculative control flow.
+across five prompts, showing directly that input shape alone can change bf16
+greedy decisions without speculative control flow.
 
 The 56 failed L40S bf16 cross-path comparisons first diverged at indices 7 (8
 runs), 10 (8), 37 (8), 42 (5), 74 (3), 83 (8), 113 (8), and 123 (8), with
 median 42. At those positions, the serial baseline's top-two gap was 0–0.125
 logits while the maximum serial-versus-batched difference was 0.140625–0.25—
-large enough to create or break a tie. On the same L40S and code commit, fp32
-reduced the target-only shape difference by roughly 3,500–17,000x and eliminated
-all target-only argmax flips. Baseline and speculative variants each repeated
-deterministically, ruling out run-to-run nondeterminism.
+large enough to create or break a tie. In four of eight prompts, the first
+speculative divergence exactly matched a target-only flip: code[2] at 113,
+QA[0] at 123, QA[2] at 10, and QA[3] at 83. Four exact matches among
+eight up-to-128-token generations are well above chance and are direct positive
+evidence for the shape/reduction-order mechanism, but they are not a complete
+explanation of all 56 failures. The control compares only serial scoring with
+one full-length forward; the speculative loop presents many block widths as
+\(k\) changes and therefore samples more reduction paths. These pre-`971d2cf`
+result JSONs did not yet store divergence summaries, so the indices above were
+parsed from the corresponding committed Slurm logs.
+
+On the same L40S and code commit, fp32 reduced the target-only shape difference
+by roughly 3,500–17,000x and eliminated all target-only argmax flips. Baseline
+and speculative variants each repeated deterministically, ruling out run-to-run
+nondeterminism.
 
 A secondary bf16 run on an RTX A5500 passed 19/64 cross-path comparisons and
-produced eight target-only flips across six prompts. Its flip and divergence
-locations differed from the L40S run. Dtype controls the magnitude and whether
-fp32 flips occur; GPU-specific kernel reduction order affects where bf16
-near-ties flip. These hardware-dependent locations support reduction-order
+produced eight target-only flips across six prompts. One of those six prompts
+had an exact first-divergence match (code[1] at 13), and its other flip and
+divergence locations differed from the L40S run. Dtype controls the magnitude
+and whether fp32 flips occur; GPU-specific kernel reduction order affects where
+bf16 near-ties flip. These hardware-dependent locations support reduction-order
 behavior rather than a fixed speculative control-flow defect.
 
 Therefore the honest boundary is:
