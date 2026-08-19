@@ -58,19 +58,15 @@ settings, and realized speculation lengths. Generate the four summary plots
 with:
 
 ```bash
-# The measured JSONs live on the data branch rather than the code branch.
-git fetch origin jojojo1256-optimized-benchmarks
-git checkout origin/jojojo1256-optimized-benchmarks -- \
-  results/raw/phase3_sweep_optimized_20260818T215822Z.json \
-  results/raw/phase3_sweep_optimized_adaptive_20260818T215822Z.json
-
 python analysis/make_figures.py \
   results/raw/phase3_sweep_optimized_20260818T215822Z.json
 ```
 
-The adaptive JSON supplies the adaptive table and attribution discussion; the
-four figures visualize the fixed-\(k\) matrix so adaptive runs are not
-misclassified as fixed \(k=5\).
+The fixed and adaptive measurements are committed together under `results/raw`;
+the adaptive file is
+`phase3_sweep_optimized_adaptive_20260818T215822Z.json`. The four figures
+visualize the fixed-\(k\) matrix so adaptive runs are not misclassified as fixed
+\(k=5\).
 
 See [`GPU_ACCESS.md`](GPU_ACCESS.md) for Oscar and standalone Linux setup.
 
@@ -307,13 +303,18 @@ established the boundary.
 - **Correctness diagnostics:** same-commit L40S 48 GB runs in fp32 (job 5083353)
   and bf16 (job 5083454) isolate dtype on one GPU. An RTX A5500 bf16 run (job
   5083352) provides the secondary hardware-location control.
+- **Executed wrappers:** the attribution wrapper matches commit `d062a50`
+  byte-for-byte, and the executable timestamped sweep wrapper is the version
+  used for job 5074257. Equality jobs 5083352, 5083353, and 5083454 ran at
+  `f3f5ee0`; `971d2cf` later revised only the opt-in no-clone debug path and
+  added diagnostic summaries, leaving the normal job arguments unchanged.
 - **Models:** `meta-llama/Llama-3.1-8B-Instruct` target;
   `meta-llama/Llama-3.2-1B-Instruct` and `3B-Instruct` drafts. The runs used
   the default Hub revisions; result JSON records the model IDs and requested
   revision fields.
 - **Software:** Python 3.11, PyTorch 2.7.1 CUDA 12.6 build, Transformers 4.53.1.
-- **Artifacts:** optimized benchmark results, logs, and figures are preserved
-  on `jojojo1256-optimized-benchmarks` at commit `dbc8f16`; implementation and
+- **Artifacts:** optimized benchmark results, logs, and figures are committed
+  under `results/raw`, `results/logs`, and `results/figures`; implementation and
   diagnostic commits are recorded in each run's JSON.
 
 Historical uncached and cached-negative results are retained unchanged rather
