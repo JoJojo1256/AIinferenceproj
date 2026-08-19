@@ -131,10 +131,10 @@ gate compared baseline, eager cached speculation, compiled StaticCache, and
 adaptive speculation over four code and four QA prompts with repeated compiled
 replays:
 
-| Precision / GPU | All gate checks | Cross-path greedy | Target-only shape-control logit delta | Argmax flips |
+| L40S precision | All gate checks | Cross-path greedy | Target-only shape-control logit delta | Argmax flips |
 |---|---:|---:|---:|---:|
-| fp32, L40S 48 GB | **73 / 73 passed** | **64 / 64** | 0.00003147–0.00008965 | 0 on all 8 prompts |
-| bf16, RTX A5500 | 28 / 73 passed | 19 / 64 | 0.25000000–0.78125000 | 8 across 6 prompts |
+| fp32 | **73 / 73 passed** | **64 / 64** | 0.00003147–0.00008965 | 0 on all 8 prompts |
+| bf16 | 17 / 73 passed | 8 / 64 | 0.31250000–0.53125000 | 6 across 5 prompts |
 
 The 73 total checks comprise 64 cross-path greedy comparisons, eight baseline
 determinism checks, and one sampled first-token distribution check.
@@ -143,33 +143,34 @@ The decisive control contains no speculative decoding. It teacher-forces the
 same fixed target-token sequence two ways: one token per target forward versus
 all tokens in one forward. In bf16, those shapes choose different kernel and
 reduction paths; floating-point addition is non-associative, and near-tied
-logits can flip argmax. This target-only control produced eight argmax flips
-across six prompts, proving that input shape alone can change bf16 greedy
+logits can flip argmax. This target-only control produced six argmax flips
+across five prompts, proving that input shape alone can change bf16 greedy
 decisions without speculative control flow.
 
-The 45 failed cross-path comparisons first diverged at indices 13 (16 runs), 31
-(8), 42 (8), 113 (5), and 121 (8), with median 31. At those positions, the
-serial baseline's top-two gap was 0–0.25 logits while the maximum serial-versus-
-batched difference was 0.125–0.3125—large enough to create or break a tie. In
-fp32 the target-only maximum difference was roughly four orders of magnitude
-smaller and no argmax changed. Baseline and speculative variants each repeated
+The 56 failed L40S bf16 cross-path comparisons first diverged at indices 7 (8
+runs), 10 (8), 37 (8), 42 (5), 74 (3), 83 (8), 113 (8), and 123 (8), with
+median 42. At those positions, the serial baseline's top-two gap was 0–0.125
+logits while the maximum serial-versus-batched difference was 0.140625–0.25—
+large enough to create or break a tie. On the same L40S and code commit, fp32
+reduced the target-only shape difference by roughly 3,500–17,000x and eliminated
+all target-only argmax flips. Baseline and speculative variants each repeated
 deterministically, ruling out run-to-run nondeterminism.
 
-The precision arms used different GPUs (A5500 for bf16, L40S for fp32), so
-precision and GPU architecture are confounded in the cross-arm magnitude
-comparison. The conclusion does not rely on that comparison alone: within the
-bf16 arm, target-only scoring reproduces argmax flips solely by changing forward
-shape, and per-divergence logits show differences comparable to the top-two
-margin. A same-card bf16 L40S run would isolate the precision effect more
-strictly.
+A secondary bf16 run on an RTX A5500 passed 19/64 cross-path comparisons and
+produced eight target-only flips across six prompts. Its flip and divergence
+locations differed from the L40S run. Dtype controls the magnitude and whether
+fp32 flips occur; GPU-specific kernel reduction order affects where bf16
+near-ties flip. These hardware-dependent locations support reduction-order
+behavior rather than a fixed speculative control-flow defect.
 
 Therefore the honest boundary is:
 
 - the algorithm is exactly distribution-preserving mathematically;
 - real fp32 generation was token-identical in all 64 cross-path greedy checks
   and passed all 73 total gate checks;
-- bf16 baseline runs are deterministic, but serial and batched kernel paths are
-  not universally token-identical near argmax ties.
+- same-card bf16 passed 8/64 cross-path greedy checks; baseline and speculative
+  runs were deterministic, but serial and batched kernel paths were not
+  universally token-identical near argmax ties.
 
 Sampled first-token checks also matched: empirical total-variation distance was
 0.0000 in both the reported fp32 and bf16 diagnostic runs.
@@ -282,17 +283,16 @@ established the boundary.
 - **Performance sweep:** RTX 3090, bf16, 128 new tokens, three warmups, five
   trials, paired same-run baselines; job 5074257.
 - **Optimization attribution:** RTX 3090, bf16; job 5074092.
-- **Correctness diagnostics:** RTX A5500 in bf16 (job 5083352) and L40S 48 GB in
-  fp32 (job 5083353). Because these are different GPU architectures, the
-  cross-dtype delta comparison is confounded; the within-arm target-only shape
-  controls provide the direct mechanism evidence.
+- **Correctness diagnostics:** same-commit L40S 48 GB runs in fp32 (job 5083353)
+  and bf16 (job 5083454) isolate dtype on one GPU. An RTX A5500 bf16 run (job
+  5083352) provides the secondary hardware-location control.
 - **Models:** `meta-llama/Llama-3.1-8B-Instruct` target;
   `meta-llama/Llama-3.2-1B-Instruct` and `3B-Instruct` drafts. The runs used
   the default Hub revisions; result JSON records the model IDs and requested
   revision fields.
 - **Software:** Python 3.11, PyTorch 2.7.1 CUDA 12.6 build, Transformers 4.53.1.
 - **Artifacts:** optimized benchmark results, logs, and figures are preserved
-  on `jojojo1256-optimized-benchmarks` at commit `d90a3d9`; implementation and
+  on `jojojo1256-optimized-benchmarks` at commit `dbc8f16`; implementation and
   diagnostic commits are recorded in each run's JSON.
 
 Historical uncached and cached-negative results are retained unchanged rather

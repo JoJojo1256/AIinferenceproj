@@ -175,8 +175,11 @@ Correctness diagnostics established a precise finite-precision boundary:
 - bf16 serial and batched target shapes can flip near-tied argmax values even
   without speculative decoding. Per-divergence logit differences were
   comparable to the top-two margins, while repeated runs were deterministic
-  within each path. The bf16 and fp32 arms used different GPU architectures,
-  so their cross-arm delta magnitudes retain that hardware confound.
+  within each path. Same-commit fp32 and bf16 runs on one L40S isolate dtype:
+  fp32 passed 64/64 cross-path checks with no target-only flips, while bf16
+  passed 8/64 and produced six target-only flips across five prompts. A
+  secondary A5500 bf16 run changed the flip locations, demonstrating the role
+  of hardware-specific reduction order.
 
 Historical uncached and cached-negative measurements remain unchanged.
 
@@ -225,5 +228,6 @@ per-block `k`, mean/median realized `k`, existing stage timings, and processed
 token counts. Historical uncached Phase 3 and cached smoke files remain
 unchanged. The optimized sweep reached `1.834x` on 1B/code. Real-GPU greedy
 equality is reported by dtype: all 64 cross-path comparisons passed in fp32,
-while bf16 exposed deterministic shape-dependent argmax flips that a
-target-only control reproduced independently of speculative decoding.
+while same-GPU bf16 passed 8/64 and exposed deterministic shape-dependent
+argmax flips that a target-only control reproduced independently of
+speculative decoding.
