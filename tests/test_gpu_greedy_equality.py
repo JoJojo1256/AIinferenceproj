@@ -1,11 +1,9 @@
 from collections import Counter
-import json
 
-import pytest
 import torch
 
 from scripts.gpu_greedy_equality import (
-    _clean_reference_cases,
+    _divergence_index_summary,
     _first_divergence,
     _mismatch_details,
     _top_two,
@@ -53,23 +51,45 @@ def test_top_two_reports_ids_values_and_absolute_gap() -> None:
     }
 
 
-def test_clean_reference_requires_schema_v2_output_tokens(tmp_path) -> None:
-    reference = tmp_path / "clean.json"
-    reference.write_text(
-        json.dumps(
-            {
-                "greedy_equality": [
-                    {
-                        "workload": "code",
-                        "prompt_index": 0,
-                        "variant": "compiled-static-fixed",
-                        "passed": True,
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_divergence_summary_reports_distribution_and_groups() -> None:
+    records = [
+        {
+            "passed": False,
+            "first_divergent_index": 7,
+            "workload": "code",
+            "variant": "eager",
+        },
+        {
+            "passed": False,
+            "first_divergent_index": 28,
+            "workload": "code",
+            "variant": "adaptive",
+        },
+        {
+            "passed": False,
+            "first_divergent_index": 7,
+            "workload": "qa",
+            "variant": "adaptive",
+        },
+        {
+            "passed": True,
+            "workload": "qa",
+            "variant": "eager",
+        },
+    ]
 
-    with pytest.raises(ValueError, match="actual_output_token_ids"):
-        _clean_reference_cases(reference)
+    summary = _divergence_index_summary(records)
+
+    assert summary["failure_count"] == 3
+    assert summary["histogram"] == {"7": 2, "28": 1}
+    assert summary["minimum"] == 7
+    assert summary["median"] == 7.0
+    assert summary["maximum"] == 28
+    assert summary["by_workload"] == {
+        "code": {"7": 1, "28": 1},
+        "qa": {"7": 1},
+    }
+    assert summary["by_variant"] == {
+        "adaptive": {"7": 1, "28": 1},
+        "eager": {"7": 1},
+    }

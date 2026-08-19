@@ -6,6 +6,7 @@ import os
 from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
+from statistics import median
 from typing import Any, Iterator
 
 import torch
@@ -59,16 +60,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
-        "--clean-reference",
-        type=Path,
-        help="Clean-run JSON used to select and compare negative-control cases.",
-    )
-    parser.add_argument(
         "--no-clone-logits",
         action="store_true",
         help=(
             "Negative control: disable compiled-logit cloning in this process. "
-            "The alias probe must detect corruption and the script exits nonzero."
+            "The buffer-level alias probe must detect overwrite; generated tokens "
+            "are not required to change because current logits are consumed before replay."
         ),
     )
     return parser.parse_args()
@@ -89,8 +86,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--stochastic-seeds must be at least 16")
     if args.stochastic_temperature <= 0:
         raise ValueError("--stochastic-temperature must be positive")
-    if args.no_clone_logits and args.clean_reference is None:
-        raise ValueError("--no-clone-logits requires --clean-reference")
     for name in ("max_first_token_tv", "max_first_token_mismatch_rate"):
         value = getattr(args, name)
         if not 0 <= value <= 1:
@@ -516,38 +511,6 @@ def _run_shape_control(
     return result
 
 
-def _clean_reference_cases(
-    path: Path | None,
-) -> tuple[set[tuple[str, int, str]], dict[tuple[str, int, str], list[int]]]:
-    if path is None:
-        return set(), {}
-    document = json.loads(path.read_text(encoding="utf-8"))
-    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
-    for record in document.get("greedy_equality", []):
-        key = (
-            str(record["workload"]),
-            int(record["prompt_index"]),
-            str(record["variant"]),
-        )
-        grouped.setdefault(key, []).append(record)
-    passing = {
-        key
-        for key, records in grouped.items()
-        if records and all(bool(record["passed"]) for record in records)
-    }
-    outputs = {
-        key: list(records[0]["actual_output_token_ids"])
-        for key, records in grouped.items()
-        if key in passing and "actual_output_token_ids" in records[0]
-    }
-    if passing and len(outputs) != len(passing):
-        raise ValueError(
-            "Clean reference lacks actual_output_token_ids; rerun the clean "
-            "schema-v2 diagnostic before using --no-clone-logits"
-        )
-    return passing, outputs
-
-
 def _run_greedy_equality(
     target: Any,
     draft: Any,
@@ -567,8 +530,6 @@ def _run_greedy_equality(
         "speculative_passes": 0,
         "speculative_failures": 0,
     }
-    clean_cases, clean_outputs = _clean_reference_cases(args.clean_reference)
-    negative_control_changes = 0
     variants = (
         ("eager-dynamic-fixed", False, False, 2),
         ("compiled-static-fixed", True, False, args.replays_per_prompt),
@@ -628,15 +589,6 @@ def _run_greedy_equality(
                 }
             )
             for label, compiled, adaptive, repeats in variants:
-                case_key = (workload, prompt_index, label)
-                if args.no_clone_logits and (
-                    not compiled or case_key not in clean_cases
-                ):
-                    print(
-                        f"SKIP {workload}[{prompt_index}] {label}: "
-                        "not a clean-passing compiled case"
-                    )
-                    continue
                 first_variant_output: list[int] | None = None
                 for replay_index in range(repeats):
                     with _record_target_logits(target, prompt) as recorder:
@@ -694,12 +646,6 @@ def _run_greedy_equality(
                                 f"{workload}[{prompt_index}] {label} "
                                 f"replay {replay_index + 1} was not deterministic"
                             )
-                    reference_output = clean_outputs.get(case_key)
-                    changed_from_clean = (
-                        reference_output is not None
-                        and result.output_token_ids != reference_output
-                    )
-                    negative_control_changes += changed_from_clean
                     record = {
                         "workload": workload,
                         "prompt_index": prompt_index,
@@ -708,7 +654,6 @@ def _run_greedy_equality(
                         "replay_index": replay_index,
                         "passed": passed,
                         "same_path_deterministic": same_path_deterministic,
-                        "changed_from_clean_reference": changed_from_clean,
                         "baseline_tokens": len(baseline.output_token_ids),
                         "speculative_tokens": len(result.output_token_ids),
                         "actual_output_token_ids": result.output_token_ids,
@@ -725,12 +670,55 @@ def _run_greedy_equality(
                             f"{workload}[{prompt_index}] {label} replay {replay_index + 1}"
                         )
                         print(json.dumps(details, indent=2))
-    if args.no_clone_logits and negative_control_changes == 0:
-        failures.append(
-            "No clean-passing generation changed when compiled-logit cloning was disabled"
-        )
-    determinism["negative_control_changed_generations"] = negative_control_changes
     return records, shape_controls, failures, determinism
+
+
+def _divergence_index_summary(
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    failed = [
+        record
+        for record in records
+        if not record["passed"] and "first_divergent_index" in record
+    ]
+    indices = [int(record["first_divergent_index"]) for record in failed]
+
+    def histogram(selected: list[dict[str, Any]]) -> dict[str, int]:
+        counts = Counter(
+            int(record["first_divergent_index"])
+            for record in selected
+            if "first_divergent_index" in record
+        )
+        return {str(index): counts[index] for index in sorted(counts)}
+
+    by_workload = {
+        workload: histogram(
+            [record for record in failed if record["workload"] == workload]
+        )
+        for workload in sorted({str(record["workload"]) for record in failed})
+    }
+    by_variant = {
+        variant: histogram(
+            [record for record in failed if record["variant"] == variant]
+        )
+        for variant in sorted({str(record["variant"]) for record in failed})
+    }
+    summary = {
+        "failure_count": len(failed),
+        "histogram": histogram(failed),
+        "minimum": min(indices) if indices else None,
+        "median": float(median(indices)) if indices else None,
+        "maximum": max(indices) if indices else None,
+        "by_workload": by_workload,
+        "by_variant": by_variant,
+    }
+    print(
+        "DIVERGENCE INDEX SUMMARY: "
+        f"count={summary['failure_count']} min={summary['minimum']} "
+        f"median={summary['median']} max={summary['maximum']} "
+        f"histogram={summary['histogram']}"
+    )
+    return summary
 
 
 def _total_variation(left: Counter[int], right: Counter[int], samples: int) -> float:
@@ -869,6 +857,7 @@ def main() -> None:
         determinism,
     ) = _run_greedy_equality(target, draft, args)
     failures.extend(greedy_failures)
+    divergence_summary = _divergence_index_summary(greedy_records)
     stochastic = _run_stochastic_check(target, draft, args)
     if not stochastic["passed"]:
         failures.append("Stochastic first-token distributions exceeded tolerance")
@@ -884,6 +873,7 @@ def main() -> None:
         "same_path_determinism": determinism,
         "target_shape_controls": shape_controls,
         "greedy_equality": greedy_records,
+        "divergence_index_summary": divergence_summary,
         "stochastic_check": stochastic,
         "failures": failures,
         "passed": not failures,

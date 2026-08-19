@@ -26,8 +26,7 @@ export TOKENIZERS_PARALLELISM=false
 
 EXTRA_ARGS=()
 if [[ "${NO_CLONE_LOGITS:-0}" == "1" ]]; then
-    : "${CLEAN_REFERENCE:?Set CLEAN_REFERENCE to the clean gpu_equality JSON}"
-    EXTRA_ARGS+=(--no-clone-logits --clean-reference "$CLEAN_REFERENCE")
+    EXTRA_ARGS+=(--no-clone-logits)
 fi
 
 DTYPE="${DTYPE:-bfloat16}"

@@ -101,17 +101,21 @@ The real 8B + 1B pair requires substantially more than 24 GB in float32; run
 that arm on a high-memory GPU (for example, an 80 GB A100), not an RTX 3090.
 
 The gate records same-path determinism, target-only incremental-versus-batched
-logit differences, and top-two logit gaps at every first divergence. In
+logit differences, top-two logit gaps at every first divergence, and the
+overall/by-workload/by-variant distribution of first-divergence indices. In
 floating-point arithmetic, batched verification and one-token baseline
 decoding can use different reduction orders; greedy equality is therefore
 reported as an empirical hardware/dtype property rather than overstated as
 bitwise universal when near-tied logits can flip argmax.
 
-The deliberate negative control evaluates only prompt/variant cases that
-passed in a clean result. It also directly proves whether uncloned compiled
-outputs were overwritten. It is expected to fail:
+The buffer-level alias probe observed `cudaGraphLaunch` on an RTX 3090, reuse
+of the raw compiled output storage, overwrite of an uncloned retained
+reference, and survival of the production clone. The current generation loop
+consumes each logit before the next replay, so removing the clone did not
+change end-to-end tokens: the hazard is real, while the clone makes safety
+explicit rather than incidental. The optional negative control is expected to
+fail the buffer-lifetime assertion:
 
 ```bash
-CLEAN_REFERENCE=results/raw/gpu_equality_bfloat16_<clean-job>.json \
 NO_CLONE_LOGITS=1 sbatch scripts/slurm_gpu_equality.sh
 ```
