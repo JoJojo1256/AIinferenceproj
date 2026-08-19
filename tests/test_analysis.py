@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from analysis.make_figures import load_measurements, make_figures
+from analysis.make_figures import (
+    Measurement,
+    _speculation_length_series,
+    load_measurements,
+    make_figures,
+)
 
 
 def _run(
@@ -79,6 +84,24 @@ def test_phase3_measurements_require_a_matching_baseline(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="matching baseline"):
         load_measurements([path])
+
+
+def test_speculation_length_series_preserve_workload_boundaries() -> None:
+    measurements = [
+        Measurement("draft-1b", "code", 5, 0.8, 1.2),
+        Measurement("draft-1b", "code", 9, 0.7, 1.6),
+        Measurement("draft-1b", "qa", 5, 0.5, 0.9),
+        Measurement("draft-1b", "qa", 9, 0.4, 0.7),
+    ]
+
+    series = {
+        item.workload: item for item in _speculation_length_series(measurements)
+    }
+
+    assert series["code"].lengths == (5, 9)
+    assert series["code"].speedups == (1.2, 1.6)
+    assert series["qa"].lengths == (5, 9)
+    assert series["qa"].speedups == (0.9, 0.7)
 
 
 def test_make_figures_writes_all_phase3_plots(tmp_path: Path) -> None:

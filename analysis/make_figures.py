@@ -22,6 +22,14 @@ class Measurement:
     speedup: float
 
 
+@dataclass(frozen=True)
+class SpeculationSeries:
+    draft_model: str
+    workload: str
+    lengths: tuple[int, ...]
+    speedups: tuple[float, ...]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Phase 3 figures from sweep JSON.")
     parser.add_argument(
@@ -137,36 +145,69 @@ def plot_acceptance_vs_speedup(
     return _save(fig, output_dir, "acceptance_vs_speedup.png")
 
 
+def _speculation_length_series(
+    measurements: Sequence[Measurement],
+) -> list[SpeculationSeries]:
+    grouped: dict[tuple[str, str, int], list[float]] = {}
+    for item in measurements:
+        key = (item.draft_model, item.workload, item.speculation_length)
+        grouped.setdefault(key, []).append(item.speedup)
+
+    pairs = sorted({(model, workload) for model, workload, _ in grouped})
+    series = []
+    for draft_model, workload in pairs:
+        lengths = tuple(
+            sorted(
+                length
+                for model, observed_workload, length in grouped
+                if model == draft_model and observed_workload == workload
+            )
+        )
+        speedups = tuple(
+            float(np.median(grouped[(draft_model, workload, length)]))
+            for length in lengths
+        )
+        series.append(
+            SpeculationSeries(
+                draft_model=draft_model,
+                workload=workload,
+                lengths=lengths,
+                speedups=speedups,
+            )
+        )
+    return series
+
+
 def plot_speculation_length(
     measurements: Sequence[Measurement],
     output_dir: Path,
 ) -> Path:
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(9, 6))
     best: tuple[float, int, str] | None = None
-    for draft_model in sorted({item.draft_model for item in measurements}):
-        selected = [item for item in measurements if item.draft_model == draft_model]
-        lengths = sorted({item.speculation_length for item in selected})
-        speedups = [
-            float(np.median([item.speedup for item in selected if item.speculation_length == length]))
-            for length in lengths
-        ]
-        label = _short_model_name(draft_model)
-        ax.plot(lengths, speedups, marker="o", label=label)
-        model_best_index = int(np.argmax(speedups))
-        candidate = (speedups[model_best_index], lengths[model_best_index], label)
-        if best is None or candidate[0] > best[0]:
+    for series in _speculation_length_series(measurements):
+        model_name = _short_model_name(series.draft_model)
+        label = f"{model_name} / {series.workload}"
+        ax.plot(series.lengths, series.speedups, marker="o", label=label)
+        best_index = int(np.argmax(series.speedups))
+        candidate = (
+            series.speedups[best_index],
+            series.lengths[best_index],
+            model_name,
+        )
+        if series.workload == "code" and (best is None or candidate[0] > best[0]):
             best = candidate
     if best is not None:
         ax.annotate(
-            f"Best median: k={best[1]} ({best[2]})",
+            f"Best code: k={best[1]}, {best[0]:.3f}x\n({best[2]})",
             xy=(best[1], best[0]),
-            xytext=(8, 12),
+            xytext=(-130, -32),
             textcoords="offset points",
+            arrowprops={"arrowstyle": "->", "color": "black"},
         )
     ax.axhline(1.0, color="black", linestyle="--", linewidth=1)
     ax.set(xlabel="Speculation length (k)", ylabel="Median speedup vs. baseline")
-    ax.set_title("Speculation length sweep")
-    ax.legend()
+    ax.set_title("Speculation length by workload")
+    ax.legend(ncol=2, fontsize="small")
     ax.grid(alpha=0.25)
     return _save(fig, output_dir, "speculation_length_vs_speedup.png")
 

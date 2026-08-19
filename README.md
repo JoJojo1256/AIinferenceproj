@@ -126,7 +126,7 @@ token limits; DynamicCache and StaticCache rollback; adaptive schedules; and
 cache-length invariants.
 
 ```text
-52 passed
+53 passed
 ```
 
 ### What real GPU arithmetic changes
@@ -232,7 +232,10 @@ Small \(k\) underutilizes each target verification; large \(k\) risks wasted
 draft work after rejection. On 1B/code, fixed \(k=1\) achieved only 0.469x,
 \(k=5\) crossed baseline at 1.115x, and \(k=9\) reached **1.587x**. Adaptive
 speculation improved further to 1.834x by growing on full acceptance and
-shrinking after rejection.
+shrinking after rejection. The six workload-specific curves deliberately avoid
+an across-workload median: the best fixed \(k\) depends on the workload, and QA
+and reasoning remain below baseline at every tested length. On code, that
+workload dependence is exactly why adapting \(k\) beats every fixed setting.
 
 ### Workload sensitivity
 
