@@ -131,25 +131,43 @@ gate compared baseline, eager cached speculation, compiled StaticCache, and
 adaptive speculation over four code and four QA prompts with repeated compiled
 replays:
 
-| Precision / GPU | Greedy checks | Target-only shape-control logit delta | Argmax flips |
-|---|---:|---:|---:|
-| fp32, L40S 48 GB | **73 / 73 passed** | 0.00003147–0.00008965 | 0 on all 8 prompts |
-| bf16, RTX A5500 | 28 / 73 passed | 0.25000000–0.78125000 | 8 across 6 prompts |
+| Precision / GPU | All gate checks | Cross-path greedy | Target-only shape-control logit delta | Argmax flips |
+|---|---:|---:|---:|---:|
+| fp32, L40S 48 GB | **73 / 73 passed** | **64 / 64** | 0.00003147–0.00008965 | 0 on all 8 prompts |
+| bf16, RTX A5500 | 28 / 73 passed | 19 / 64 | 0.25000000–0.78125000 | 8 across 6 prompts |
+
+The 73 total checks comprise 64 cross-path greedy comparisons, eight baseline
+determinism checks, and one sampled first-token distribution check.
 
 The decisive control contains no speculative decoding. It teacher-forces the
 same fixed target-token sequence two ways: one token per target forward versus
 all tokens in one forward. In bf16, those shapes choose different kernel and
 reduction paths; floating-point addition is non-associative, and near-tied
-logits can flip argmax. The control's first flip indices matched speculative
-divergences—for example QA at indices 45 and 123, and code at 124. In fp32 the
-maximum logit difference was about four orders of magnitude smaller and no
-argmax changed. Baseline repeated deterministically on every prompt, ruling out
-run-to-run nondeterminism.
+logits can flip argmax. This target-only control produced eight argmax flips
+across six prompts, proving that input shape alone can change bf16 greedy
+decisions without speculative control flow.
+
+The 45 failed cross-path comparisons first diverged at indices 13 (16 runs), 31
+(8), 42 (8), 113 (5), and 121 (8), with median 31. At those positions, the
+serial baseline's top-two gap was 0–0.25 logits while the maximum serial-versus-
+batched difference was 0.125–0.3125—large enough to create or break a tie. In
+fp32 the target-only maximum difference was roughly four orders of magnitude
+smaller and no argmax changed. Baseline and speculative variants each repeated
+deterministically, ruling out run-to-run nondeterminism.
+
+The precision arms used different GPUs (A5500 for bf16, L40S for fp32), so
+precision and GPU architecture are confounded in the cross-arm magnitude
+comparison. The conclusion does not rely on that comparison alone: within the
+bf16 arm, target-only scoring reproduces argmax flips solely by changing forward
+shape, and per-divergence logits show differences comparable to the top-two
+margin. A same-card bf16 L40S run would isolate the precision effect more
+strictly.
 
 Therefore the honest boundary is:
 
 - the algorithm is exactly distribution-preserving mathematically;
-- real fp32 generation was token-identical in all 73 checks;
+- real fp32 generation was token-identical in all 64 cross-path greedy checks
+  and passed all 73 total gate checks;
 - bf16 baseline runs are deterministic, but serial and batched kernel paths are
   not universally token-identical near argmax ties.
 
@@ -265,7 +283,9 @@ established the boundary.
   trials, paired same-run baselines; job 5074257.
 - **Optimization attribution:** RTX 3090, bf16; job 5074092.
 - **Correctness diagnostics:** RTX A5500 in bf16 (job 5083352) and L40S 48 GB in
-  fp32 (job 5083353).
+  fp32 (job 5083353). Because these are different GPU architectures, the
+  cross-dtype delta comparison is confounded; the within-arm target-only shape
+  controls provide the direct mechanism evidence.
 - **Models:** `meta-llama/Llama-3.1-8B-Instruct` target;
   `meta-llama/Llama-3.2-1B-Instruct` and `3B-Instruct` drafts. The runs used
   the default Hub revisions; result JSON records the model IDs and requested

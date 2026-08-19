@@ -170,10 +170,13 @@ Correctness diagnostics established a precise finite-precision boundary:
 
 - modified rejection sampling remains exactly distribution-preserving
   mathematically;
-- the real 8B+1B fp32 arm passed all 73 greedy comparisons;
+- the real 8B+1B fp32 arm passed all 73 gate checks, including all 64
+  cross-path greedy comparisons;
 - bf16 serial and batched target shapes can flip near-tied argmax values even
-  without speculative decoding. The target-only control reproduced the same
-  divergence indices, while repeated runs were deterministic within each path.
+  without speculative decoding. Per-divergence logit differences were
+  comparable to the top-two margins, while repeated runs were deterministic
+  within each path. The bf16 and fp32 arms used different GPU architectures,
+  so their cross-arm delta magnitudes retain that hardware confound.
 
 Historical uncached and cached-negative measurements remain unchanged.
 
@@ -221,6 +224,6 @@ The result schema records compile/cache/adaptive switches, initial and realized
 per-block `k`, mean/median realized `k`, existing stage timings, and processed
 token counts. Historical uncached Phase 3 and cached smoke files remain
 unchanged. The optimized sweep reached `1.834x` on 1B/code. Real-GPU greedy
-equality is reported by dtype: 73/73 comparisons passed in fp32, while bf16
-exposed deterministic shape-dependent argmax flips that a target-only control
-reproduced independently of speculative decoding.
+equality is reported by dtype: all 64 cross-path comparisons passed in fp32,
+while bf16 exposed deterministic shape-dependent argmax flips that a
+target-only control reproduced independently of speculative decoding.
