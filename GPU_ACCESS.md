@@ -14,9 +14,25 @@ sbatch scripts/slurm_baseline.sh
 sbatch scripts/slurm_specdec.sh
 sbatch scripts/slurm_sweep.sh
 sbatch scripts/slurm_cached_smoke.sh
+sbatch scripts/slurm_optimized_smoke.sh
+sbatch scripts/slurm_optimized_sweep.sh
+sbatch scripts/slurm_gpu_equality.sh
 ```
 
-The target 8B model plus 1B draft should be attempted first on a 24 GB Ampere GPU. `slurm_cached_smoke.sh` gates the corrected implementation on code and QA with `k=3/4/5`, three warmups, and five trials. The 3B draft may require more VRAM. Store the repository, Hugging Face cache, and raw results under `~/scratch`; copy important results off Oscar before the 48-hour exploratory allocation expires.
+The target 8B model plus 1B draft fits in bf16 on a 24 GB Ampere GPU.
+`slurm_optimized_smoke.sh` runs the attribution matrix and
+`slurm_optimized_sweep.sh` runs both draft models across code, QA, and
+reasoning for the fixed and adaptive matrices. `slurm_gpu_equality.sh` runs
+real-model CUDA correctness diagnostics. The fp32 correctness arm requires a
+larger GPU; the recorded 8B+1B run used a 48 GB L40S:
+
+```bash
+DTYPE=float32 sbatch scripts/slurm_gpu_equality.sh
+```
+
+The 3B draft may require more VRAM. Store the repository, Hugging Face cache,
+and raw results under `~/scratch`; copy important results off Oscar before the
+48-hour exploratory allocation expires.
 
 ## Alternative: standalone Linux CUDA host
 

@@ -100,7 +100,10 @@ lengths must match the logical committed length under the pending-token rule.
 
 ## Correctness gates
 
-- Greedy output is token-for-token equal to cached baseline decoding.
+- Greedy output is token-for-token equal to cached baseline decoding in exact
+  arithmetic and the deterministic CPU test path. Real-GPU equality is reported
+  separately by dtype because serial and batched low-precision kernels can
+  choose different argmax values near ties.
 - Sampled decoding retains modified rejection sampling and matches target
   distributions within the existing statistical test.
 - Rejection is tested at the first, middle, and final proposal positions.
@@ -150,29 +153,29 @@ An optional cross-check may run Hugging Face assisted generation with the same
 target/draft pair and prompts. It is diagnostic only because `generate()` has
 different orchestration and timing boundaries.
 
-## Success criteria
+## Measured outcome
 
-- All targeted and repository tests pass.
-- The implementation never executes a full-prefix model call after prefill.
-- Processed-token metrics confirm incremental scaling.
-- The 1B/code cached smoke sweep exceeds `1.0x` baseline median throughput for
-  at least one of `k=3/4/5`, without correctness failures.
+The cached smoke improved the best result to about `0.78x`, but did not meet the
+throughput goal. Stage timing identified the new bottleneck: 26.7 seconds in
+the serial 1B draft proposal loop versus 7.6 seconds in target verification.
+That measurement motivated the compile, StaticCache, and adaptive-depth
+follow-up below.
 
-## Fallback if no speedup appears
+The optimized full sweep met the performance goal. On an RTX 3090 in bf16, the
+1B draft on code reached `1.587x` at fixed `k=9` and `1.834x` with adaptive
+speculation starting at five. QA and reasoning remained slower than baseline,
+and the worst optimized case was the 3B draft on reasoning at `k=1` (`0.424x`).
 
-If correctness and processed-token counts pass but no configuration exceeds
-`1.0x`, collect stage timings and compare:
+Correctness diagnostics established a precise finite-precision boundary:
 
-1. draft proposal share;
-2. target verification share;
-3. sampling/cache-update overhead;
-4. acceptance and accepted tokens per target pass.
+- modified rejection sampling remains exactly distribution-preserving
+  mathematically;
+- the real 8B+1B fp32 arm passed all 73 greedy comparisons;
+- bf16 serial and batched target shapes can flip near-tied argmax values even
+  without speculative decoding. The target-only control reproduced the same
+  divergence indices, while repeated runs were deterministic within each path.
 
-Cross-check one case with Hugging Face assisted generation. If both paths are
-slow, report model-pair/hardware economics (draft latency or acceptance) as the
-remaining negative result. If Hugging Face is faster, profile Python launch
-overhead, attention backend, cache format/copies, and synchronization before
-changing the algorithm or claiming a speedup.
+Historical uncached and cached-negative measurements remain unchanged.
 
 ## Draft decode optimization follow-up
 
@@ -210,8 +213,14 @@ with three warmups and five trials:
 4. compiled draft StaticCache with adaptive `k`, starting at five and capped at
    fifteen.
 
+`scripts/slurm_optimized_sweep.sh` runs the full measured matrix: both draft
+models, code/QA/reasoning, fixed `k` in `{1, 2, 3, 5, 7, 9}`, and adaptive
+speculation starting at five with a cap of fifteen.
+
 The result schema records compile/cache/adaptive switches, initial and realized
 per-block `k`, mean/median realized `k`, existing stage timings, and processed
 token counts. Historical uncached Phase 3 and cached smoke files remain
-unchanged. Success remains at least one configuration above `1.0x` baseline
-throughput with all greedy and sampled correctness gates intact.
+unchanged. The optimized sweep reached `1.834x` on 1B/code. Real-GPU greedy
+equality is reported by dtype: 73/73 comparisons passed in fp32, while bf16
+exposed deterministic shape-dependent argmax flips that a target-only control
+reproduced independently of speculative decoding.
