@@ -26,17 +26,20 @@ export TOKENIZERS_PARALLELISM=false
 
 EXTRA_ARGS=()
 if [[ "${NO_CLONE_LOGITS:-0}" == "1" ]]; then
-    EXTRA_ARGS+=(--no-clone-logits)
+    : "${CLEAN_REFERENCE:?Set CLEAN_REFERENCE to the clean gpu_equality JSON}"
+    EXTRA_ARGS+=(--no-clone-logits --clean-reference "$CLEAN_REFERENCE")
 fi
+
+DTYPE="${DTYPE:-bfloat16}"
 
 python -u scripts/gpu_greedy_equality.py \
     --target-model meta-llama/Llama-3.1-8B-Instruct \
     --draft-model meta-llama/Llama-3.2-1B-Instruct \
-    --dtype bfloat16 \
+    --dtype "$DTYPE" \
     --max-new-tokens 128 \
     --static-cache-max-length 512 \
     --compile-warmups 3 \
     --replays-per-prompt 3 \
     --stochastic-seeds 64 \
-    --output "results/raw/gpu_equality_${SLURM_JOB_ID}.json" \
+    --output "results/raw/gpu_equality_${DTYPE}_${SLURM_JOB_ID}.json" \
     "${EXTRA_ARGS[@]}"

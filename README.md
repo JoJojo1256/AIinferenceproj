@@ -90,10 +90,28 @@ distributions:
 sbatch scripts/slurm_gpu_equality.sh
 ```
 
-The deliberate negative control disables compiled-logit cloning and is
-expected to fail the job. The output distinguishes observed alias corruption
-from a negative control that did not reproduce buffer reuse:
+Run the precision diagnostic separately to distinguish reduced-precision
+shape effects from algorithmic errors:
 
 ```bash
+DTYPE=float32 sbatch scripts/slurm_gpu_equality.sh
+```
+
+The real 8B + 1B pair requires substantially more than 24 GB in float32; run
+that arm on a high-memory GPU (for example, an 80 GB A100), not an RTX 3090.
+
+The gate records same-path determinism, target-only incremental-versus-batched
+logit differences, and top-two logit gaps at every first divergence. In
+floating-point arithmetic, batched verification and one-token baseline
+decoding can use different reduction orders; greedy equality is therefore
+reported as an empirical hardware/dtype property rather than overstated as
+bitwise universal when near-tied logits can flip argmax.
+
+The deliberate negative control evaluates only prompt/variant cases that
+passed in a clean result. It also directly proves whether uncloned compiled
+outputs were overwritten. It is expected to fail:
+
+```bash
+CLEAN_REFERENCE=results/raw/gpu_equality_bfloat16_<clean-job>.json \
 NO_CLONE_LOGITS=1 sbatch scripts/slurm_gpu_equality.sh
 ```

@@ -4,11 +4,13 @@ import argparse
 import json
 import os
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import torch
 from torch.profiler import ProfilerActivity, profile
+from transformers.cache_utils import DynamicCache
 
 import specdec.speculative as speculative_module
 from specdec.baseline import generate_baseline
@@ -39,7 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draft-model", default=DRAFT_MODEL)
     parser.add_argument("--target-revision")
     parser.add_argument("--draft-revision")
-    parser.add_argument("--dtype", choices=("float16", "bfloat16"), default="bfloat16")
+    parser.add_argument(
+        "--dtype",
+        choices=("float16", "bfloat16", "float32"),
+        default="bfloat16",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--cache-dir", default=os.environ.get("HF_HOME"))
     parser.add_argument("--max-new-tokens", type=int, default=128)
@@ -52,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-first-token-mismatch-rate", type=float, default=0.10)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--clean-reference",
+        type=Path,
+        help="Clean-run JSON used to select and compare negative-control cases.",
+    )
     parser.add_argument(
         "--no-clone-logits",
         action="store_true",
@@ -78,6 +89,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--stochastic-seeds must be at least 16")
     if args.stochastic_temperature <= 0:
         raise ValueError("--stochastic-temperature must be positive")
+    if args.no_clone_logits and args.clean_reference is None:
+        raise ValueError("--no-clone-logits requires --clean-reference")
     for name in ("max_first_token_tv", "max_first_token_mismatch_rate"):
         value = getattr(args, name)
         if not 0 <= value <= 1:
@@ -123,6 +136,174 @@ def _mismatch_details(
         "actual_token_ids": actual_window,
         "expected_text": tokenizer.decode(expected_window, skip_special_tokens=False),
         "actual_text": tokenizer.decode(actual_window, skip_special_tokens=False),
+    }
+
+
+def _top_two(logits: torch.Tensor) -> dict[str, Any]:
+    values, token_ids = torch.topk(logits.float(), k=2)
+    return {
+        "token_ids": [int(token_id) for token_id in token_ids.tolist()],
+        "logits": [float(value) for value in values.tolist()],
+        "absolute_gap": float((values[0] - values[1]).abs().item()),
+    }
+
+
+@torch.inference_mode()
+def _score_fixed_sequence(
+    target: Any,
+    prompt: str,
+    token_ids: list[int],
+    *,
+    batched: bool,
+) -> list[torch.Tensor]:
+    device = next(target.model.parameters()).device
+    encoded = encode_prompt(target.tokenizer, prompt, device)
+    input_ids = encoded["input_ids"]
+    attention_mask = encoded["attention_mask"]
+    outputs = target.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=True,
+    )
+    scores = [outputs.logits[0, -1].float().cpu()]
+    if len(token_ids) <= 1:
+        return scores
+
+    continuation = torch.tensor(
+        [token_ids[:-1]],
+        device=device,
+        dtype=input_ids.dtype,
+    )
+    if batched:
+        full_mask = torch.cat(
+            (
+                attention_mask,
+                torch.ones(
+                    (1, continuation.shape[1]),
+                    device=device,
+                    dtype=attention_mask.dtype,
+                ),
+            ),
+            dim=1,
+        )
+        continuation_outputs = target.model(
+            input_ids=continuation,
+            attention_mask=full_mask,
+            past_key_values=outputs.past_key_values,
+            use_cache=True,
+        )
+        scores.extend(
+            row.float().cpu() for row in continuation_outputs.logits[0]
+        )
+        return scores
+
+    cache = outputs.past_key_values
+    running_mask = attention_mask
+    for token in continuation[0]:
+        running_mask = torch.cat(
+            (
+                running_mask,
+                torch.ones(
+                    (1, 1),
+                    device=device,
+                    dtype=running_mask.dtype,
+                ),
+            ),
+            dim=1,
+        )
+        step_outputs = target.model(
+            input_ids=token.reshape(1, 1),
+            attention_mask=running_mask,
+            past_key_values=cache,
+            use_cache=True,
+        )
+        cache = step_outputs.past_key_values
+        scores.append(step_outputs.logits[0, -1].float().cpu())
+    return scores
+
+
+class _TargetLogitRecorder:
+    def __init__(self, target: Any, prompt_length: int) -> None:
+        self.target = target
+        self.prompt_length = prompt_length
+        self.original_forward = target.model.forward
+        self.by_output_index: dict[int, list[dict[str, Any]]] = {}
+        self.call_index = 0
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        cache = kwargs.get("past_key_values")
+        if cache is None:
+            cache_length = 0
+        elif isinstance(cache, DynamicCache):
+            cache_length = int(cache.get_seq_length())
+        else:
+            cache_length = int(cache.get_seq_length())
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None:
+            raise RuntimeError("Diagnostic recorder requires input_ids")
+        outputs = self.original_forward(*args, **kwargs)
+        for row_index, row in enumerate(outputs.logits[0]):
+            output_index = (
+                cache_length + row_index + 1 - self.prompt_length
+            )
+            if output_index < 0:
+                continue
+            self.by_output_index.setdefault(output_index, []).append(
+                {
+                    "call_index": self.call_index,
+                    "cache_length": cache_length,
+                    "input_length": int(input_ids.shape[1]),
+                    "logits": row.detach().float().cpu(),
+                }
+            )
+        self.call_index += 1
+        return outputs
+
+    def logits_for(self, output_index: int, emitted_token_id: int) -> dict[str, Any] | None:
+        candidates = self.by_output_index.get(output_index, [])
+        for candidate in reversed(candidates):
+            if int(torch.argmax(candidate["logits"]).item()) == emitted_token_id:
+                return candidate
+        return candidates[-1] if candidates else None
+
+
+@contextmanager
+def _record_target_logits(
+    target: Any,
+    prompt: str,
+) -> Iterator[_TargetLogitRecorder]:
+    device = next(target.model.parameters()).device
+    prompt_length = int(
+        encode_prompt(target.tokenizer, prompt, device)["input_ids"].shape[1]
+    )
+    recorder = _TargetLogitRecorder(target, prompt_length)
+    target.model.forward = recorder.forward
+    try:
+        yield recorder
+    finally:
+        target.model.forward = recorder.original_forward
+
+
+def _divergence_logit_details(
+    divergence_index: int,
+    actual_token_id: int,
+    baseline_logits: list[torch.Tensor],
+    recorder: _TargetLogitRecorder,
+) -> dict[str, Any]:
+    speculative = recorder.logits_for(divergence_index, actual_token_id)
+    if speculative is None:
+        return {"logit_diagnostics_error": "No speculative logits recorded"}
+    baseline = baseline_logits[divergence_index]
+    speculative_logits = speculative["logits"]
+    return {
+        "baseline_top2": _top_two(baseline),
+        "speculative_top2": _top_two(speculative_logits),
+        "max_absolute_logit_difference": float(
+            torch.max(torch.abs(baseline - speculative_logits)).item()
+        ),
+        "speculative_target_call_index": speculative["call_index"],
+        "speculative_target_cache_length": speculative["cache_length"],
+        "speculative_target_input_length": speculative["input_length"],
     }
 
 
@@ -281,15 +462,115 @@ def _run_alias_probe(draft: Any, args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _run_shape_control(
+    target: Any,
+    prompt: str,
+    token_ids: list[int],
+    *,
+    incremental: list[torch.Tensor] | None = None,
+) -> dict[str, Any]:
+    if incremental is None:
+        incremental = _score_fixed_sequence(
+            target,
+            prompt,
+            token_ids,
+            batched=False,
+        )
+    batched = _score_fixed_sequence(
+        target,
+        prompt,
+        token_ids,
+        batched=True,
+    )
+    differences = [
+        float(torch.max(torch.abs(left - right)).item())
+        for left, right in zip(incremental, batched, strict=True)
+    ]
+    argmax_differences = [
+        index
+        for index, (left, right) in enumerate(
+            zip(incremental, batched, strict=True)
+        )
+        if int(torch.argmax(left).item()) != int(torch.argmax(right).item())
+    ]
+    first_argmax_difference = (
+        argmax_differences[0] if argmax_differences else None
+    )
+    result: dict[str, Any] = {
+        "max_absolute_logit_difference": max(differences, default=0.0),
+        "argmax_difference_count": len(argmax_differences),
+        "argmax_difference_indices": argmax_differences,
+        "first_argmax_difference": first_argmax_difference,
+    }
+    if first_argmax_difference is not None:
+        index = first_argmax_difference
+        result["first_difference_incremental_top2"] = _top_two(incremental[index])
+        result["first_difference_batched_top2"] = _top_two(batched[index])
+        result["first_difference_max_absolute_logit_difference"] = differences[index]
+    print(
+        "SHAPE CONTROL: "
+        f"max_abs_diff={result['max_absolute_logit_difference']:.8f} "
+        f"argmax_differences={len(argmax_differences)} "
+        f"first={first_argmax_difference}"
+    )
+    return result
+
+
+def _clean_reference_cases(
+    path: Path | None,
+) -> tuple[set[tuple[str, int, str]], dict[tuple[str, int, str], list[int]]]:
+    if path is None:
+        return set(), {}
+    document = json.loads(path.read_text(encoding="utf-8"))
+    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+    for record in document.get("greedy_equality", []):
+        key = (
+            str(record["workload"]),
+            int(record["prompt_index"]),
+            str(record["variant"]),
+        )
+        grouped.setdefault(key, []).append(record)
+    passing = {
+        key
+        for key, records in grouped.items()
+        if records and all(bool(record["passed"]) for record in records)
+    }
+    outputs = {
+        key: list(records[0]["actual_output_token_ids"])
+        for key, records in grouped.items()
+        if key in passing and "actual_output_token_ids" in records[0]
+    }
+    if passing and len(outputs) != len(passing):
+        raise ValueError(
+            "Clean reference lacks actual_output_token_ids; rerun the clean "
+            "schema-v2 diagnostic before using --no-clone-logits"
+        )
+    return passing, outputs
+
+
 def _run_greedy_equality(
     target: Any,
     draft: Any,
     args: argparse.Namespace,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[str],
+    dict[str, int],
+]:
     records: list[dict[str, Any]] = []
+    shape_controls: list[dict[str, Any]] = []
     failures: list[str] = []
+    determinism = {
+        "baseline_passes": 0,
+        "baseline_failures": 0,
+        "speculative_passes": 0,
+        "speculative_failures": 0,
+    }
+    clean_cases, clean_outputs = _clean_reference_cases(args.clean_reference)
+    negative_control_changes = 0
     variants = (
-        ("eager-dynamic-fixed", False, False, 1),
+        ("eager-dynamic-fixed", False, False, 2),
         ("compiled-static-fixed", True, False, args.replays_per_prompt),
         ("compiled-static-adaptive", True, True, args.replays_per_prompt),
     )
@@ -305,25 +586,120 @@ def _run_greedy_equality(
                 temperature=0.0,
                 seed=args.seed,
             )
+            repeated_baseline = generate_baseline(
+                target,
+                prompt,
+                max_new_tokens=args.max_new_tokens,
+                temperature=0.0,
+                seed=args.seed,
+            )
+            baseline_deterministic = (
+                baseline.output_token_ids == repeated_baseline.output_token_ids
+            )
+            determinism[
+                "baseline_passes" if baseline_deterministic else "baseline_failures"
+            ] += 1
+            print(
+                f"{'PASS' if baseline_deterministic else 'FAIL'} "
+                f"{workload}[{prompt_index}] baseline determinism"
+            )
+            if not baseline_deterministic:
+                failures.append(
+                    f"{workload}[{prompt_index}] baseline was not deterministic"
+                )
+            baseline_logits = _score_fixed_sequence(
+                target,
+                prompt,
+                baseline.output_token_ids,
+                batched=False,
+            )
+            shape_control = _run_shape_control(
+                target,
+                prompt,
+                baseline.output_token_ids,
+                incremental=baseline_logits,
+            )
+            shape_controls.append(
+                {
+                    "workload": workload,
+                    "prompt_index": prompt_index,
+                    "prompt": prompt,
+                    **shape_control,
+                }
+            )
             for label, compiled, adaptive, repeats in variants:
-                for replay_index in range(repeats):
-                    result = generate_speculative(
-                        target,
-                        draft,
-                        prompt,
-                        seed=args.seed,
-                        **_speculative_options(
-                            args,
-                            compiled=compiled,
-                            adaptive=adaptive,
-                        ),
+                case_key = (workload, prompt_index, label)
+                if args.no_clone_logits and (
+                    not compiled or case_key not in clean_cases
+                ):
+                    print(
+                        f"SKIP {workload}[{prompt_index}] {label}: "
+                        "not a clean-passing compiled case"
                     )
+                    continue
+                first_variant_output: list[int] | None = None
+                for replay_index in range(repeats):
+                    with _record_target_logits(target, prompt) as recorder:
+                        result = generate_speculative(
+                            target,
+                            draft,
+                            prompt,
+                            seed=args.seed,
+                            **_speculative_options(
+                                args,
+                                compiled=compiled,
+                                adaptive=adaptive,
+                            ),
+                        )
                     details = _mismatch_details(
                         baseline.output_token_ids,
                         result.output_token_ids,
                         target.tokenizer,
                     )
+                    divergence_index = details.get("first_divergent_index")
+                    if divergence_index is not None:
+                        index = int(divergence_index)
+                        if (
+                            index < len(result.output_token_ids)
+                            and index < len(baseline_logits)
+                        ):
+                            details.update(
+                                _divergence_logit_details(
+                                    index,
+                                    result.output_token_ids[index],
+                                    baseline_logits,
+                                    recorder,
+                                )
+                            )
+                        else:
+                            details["logit_diagnostics_error"] = (
+                                "Length-only divergence: one output is a strict "
+                                "prefix, so no paired logits exist at this index"
+                            )
                     passed = not details
+                    if first_variant_output is None:
+                        first_variant_output = result.output_token_ids
+                        same_path_deterministic = True
+                    else:
+                        same_path_deterministic = (
+                            result.output_token_ids == first_variant_output
+                        )
+                        determinism[
+                            "speculative_passes"
+                            if same_path_deterministic
+                            else "speculative_failures"
+                        ] += 1
+                        if not same_path_deterministic:
+                            failures.append(
+                                f"{workload}[{prompt_index}] {label} "
+                                f"replay {replay_index + 1} was not deterministic"
+                            )
+                    reference_output = clean_outputs.get(case_key)
+                    changed_from_clean = (
+                        reference_output is not None
+                        and result.output_token_ids != reference_output
+                    )
+                    negative_control_changes += changed_from_clean
                     record = {
                         "workload": workload,
                         "prompt_index": prompt_index,
@@ -331,8 +707,11 @@ def _run_greedy_equality(
                         "variant": label,
                         "replay_index": replay_index,
                         "passed": passed,
+                        "same_path_deterministic": same_path_deterministic,
+                        "changed_from_clean_reference": changed_from_clean,
                         "baseline_tokens": len(baseline.output_token_ids),
                         "speculative_tokens": len(result.output_token_ids),
+                        "actual_output_token_ids": result.output_token_ids,
                         **details,
                     }
                     records.append(record)
@@ -346,7 +725,12 @@ def _run_greedy_equality(
                             f"{workload}[{prompt_index}] {label} replay {replay_index + 1}"
                         )
                         print(json.dumps(details, indent=2))
-    return records, failures
+    if args.no_clone_logits and negative_control_changes == 0:
+        failures.append(
+            "No clean-passing generation changed when compiled-logit cloning was disabled"
+        )
+    determinism["negative_control_changed_generations"] = negative_control_changes
+    return records, shape_controls, failures, determinism
 
 
 def _total_variation(left: Counter[int], right: Counter[int], samples: int) -> float:
@@ -478,20 +862,27 @@ def main() -> None:
     elif not alias_probe["retained_logits_unchanged"]:
         failures.append("Cloned compiled logits were overwritten")
 
-    greedy_records, greedy_failures = _run_greedy_equality(target, draft, args)
+    (
+        greedy_records,
+        shape_controls,
+        greedy_failures,
+        determinism,
+    ) = _run_greedy_equality(target, draft, args)
     failures.extend(greedy_failures)
     stochastic = _run_stochastic_check(target, draft, args)
     if not stochastic["passed"]:
         failures.append("Stochastic first-token distributions exceeded tolerance")
 
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "provenance": collect_provenance(),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
         },
         "alias_probe": alias_probe,
+        "same_path_determinism": determinism,
+        "target_shape_controls": shape_controls,
         "greedy_equality": greedy_records,
         "stochastic_check": stochastic,
         "failures": failures,
