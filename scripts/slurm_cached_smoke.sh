@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=specdec-baseline
+#SBATCH --job-name=specdec-cached-smoke
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=40G
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=results/logs/%x_%j.out
 #SBATCH --error=results/logs/%x_%j.err
 
@@ -28,9 +28,15 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
     exit 1
 fi
 
-python -u experiments/run_baseline.py \
+python -u experiments/run_sweep.py \
+    --draft-model meta-llama/Llama-3.2-1B-Instruct \
+    --workload code \
     --workload qa \
+    --speculation-length 3 \
+    --speculation-length 4 \
+    --speculation-length 5 \
     --dtype bfloat16 \
     --max-new-tokens 128 \
     --warmup-runs 3 \
-    --trials 10
+    --trials 5 \
+    --output results/raw/cached_specdec_smoke.json

@@ -4,7 +4,7 @@ The project requires an NVIDIA CUDA GPU. FPGA instances and graphics-only hosts 
 
 ## Preferred: Brown Oscar
 
-Use the free exploratory account and submit the committed Slurm scripts:
+The Brown exploratory account provides four CPU cores and two standard GPUs for 48 hours, but no persistent data directory. This project requests one GPU and four CPU cores so both jobs fit within that allocation. Submit the committed Slurm scripts:
 
 ```bash
 interact -q gpu -g 1 -f ampere -m 40g -n 4
@@ -12,9 +12,27 @@ bash env/setup.sh
 export HF_TOKEN="<read-only-token>"
 sbatch scripts/slurm_baseline.sh
 sbatch scripts/slurm_specdec.sh
+sbatch scripts/slurm_sweep.sh
+sbatch scripts/slurm_cached_smoke.sh
+sbatch scripts/slurm_optimized_smoke.sh
+sbatch scripts/slurm_optimized_sweep.sh
+sbatch scripts/slurm_gpu_equality.sh
 ```
 
-The target 8B model plus 1B draft should be attempted first on a 24 GB Ampere GPU. The 3B draft may require more VRAM.
+The target 8B model plus 1B draft fits in bf16 on a 24 GB Ampere GPU.
+`slurm_optimized_smoke.sh` runs the attribution matrix and
+`slurm_optimized_sweep.sh` runs both draft models across code, QA, and
+reasoning for the fixed and adaptive matrices. `slurm_gpu_equality.sh` runs
+real-model CUDA correctness diagnostics. The fp32 correctness arm requires a
+larger GPU; the recorded 8B+1B run used a 48 GB L40S:
+
+```bash
+DTYPE=float32 sbatch scripts/slurm_gpu_equality.sh
+```
+
+The 3B draft may require more VRAM. Store the repository, Hugging Face cache,
+and raw results under `~/scratch`; copy important results off Oscar before the
+48-hour exploratory allocation expires.
 
 ## Alternative: standalone Linux CUDA host
 
@@ -27,6 +45,7 @@ bash env/setup_linux_gpu.sh
 export HF_TOKEN="<read-only-token>"
 bash scripts/run_gpu.sh baseline --workload qa
 bash scripts/run_gpu.sh speculative --workload qa --speculation-length 4
+bash scripts/run_gpu.sh sweep
 ```
 
 The preflight exits before model download when CUDA is unavailable or the GPU has less than 20 GiB of VRAM.

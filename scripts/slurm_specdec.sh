@@ -17,7 +17,7 @@ mkdir -p results/logs results/raw
 
 module purge
 unset LD_LIBRARY_PATH || true
-module load cudnn cuda
+module load cudnn cuda "${PYTHON_MODULE:-python/3.11.11-5e66}"
 source "${VENV_PATH:-$HOME/specdec.venv}/bin/activate"
 
 export HF_HOME="${HF_HOME:-$HOME/scratch/hf_cache}"

@@ -11,7 +11,12 @@ from typing import Any
 import torch
 import transformers
 
-from specdec.metrics import GenerationMetrics, SpeculativeGenerationMetrics, summarize_trials
+from specdec.metrics import (
+    GenerationMetrics,
+    SpeculativeGenerationMetrics,
+    percentile,
+    summarize_trials,
+)
 
 GenerateFunction = Callable[[str, int], GenerationMetrics]
 
@@ -73,6 +78,12 @@ def run_benchmark(
     if speculative_trials:
         proposed_tokens = sum(trial.proposed_tokens for trial in speculative_trials)
         accepted_tokens = sum(trial.accepted_tokens for trial in speculative_trials)
+        realized_speculation_lengths = [
+            length
+            for trial in speculative_trials
+            for length in (trial.realized_speculation_lengths or [])
+        ]
+        first_speculative = speculative_trials[0]
         summary.update(
             {
                 "proposed_tokens": proposed_tokens,
@@ -80,6 +91,44 @@ def run_benchmark(
                 "acceptance_rate": accepted_tokens / proposed_tokens if proposed_tokens else 0.0,
                 "target_forward_passes": sum(
                     trial.target_forward_passes for trial in speculative_trials
+                ),
+                "target_processed_tokens": sum(
+                    trial.target_processed_tokens for trial in speculative_trials
+                ),
+                "draft_processed_tokens": sum(
+                    trial.draft_processed_tokens for trial in speculative_trials
+                ),
+                "prefill_time_ms": sum(
+                    trial.prefill_time_ms for trial in speculative_trials
+                ),
+                "draft_proposal_time_ms": sum(
+                    trial.draft_proposal_time_ms for trial in speculative_trials
+                ),
+                "target_verification_time_ms": sum(
+                    trial.target_verification_time_ms for trial in speculative_trials
+                ),
+                "sampling_overhead_time_ms": sum(
+                    trial.sampling_overhead_time_ms for trial in speculative_trials
+                ),
+                "draft_compiled": first_speculative.draft_compiled,
+                "draft_cache_implementation": (
+                    first_speculative.draft_cache_implementation
+                ),
+                "target_cache_implementation": (
+                    first_speculative.target_cache_implementation
+                ),
+                "adaptive_speculation": first_speculative.adaptive_speculation,
+                "initial_speculation_length": (
+                    first_speculative.initial_speculation_length
+                ),
+                "realized_speculation_length_mean": (
+                    sum(realized_speculation_lengths) / len(realized_speculation_lengths)
+                    if realized_speculation_lengths
+                    else 0.0
+                ),
+                "realized_speculation_length_median": percentile(
+                    realized_speculation_lengths,
+                    50,
                 ),
             }
         )
@@ -100,5 +149,7 @@ def run_benchmark(
 def write_results(results: dict[str, Any], output_path: str | Path) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(path)
     return path

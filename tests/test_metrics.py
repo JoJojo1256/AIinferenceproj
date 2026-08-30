@@ -1,4 +1,4 @@
-from specdec.harness import run_benchmark
+from specdec.harness import run_benchmark, write_results
 from specdec.metrics import (
     GenerationMetrics,
     SpeculativeGenerationMetrics,
@@ -40,6 +40,18 @@ def test_harness_summarizes_speculative_acceptance() -> None:
             accepted_tokens=3,
             target_forward_passes=2,
             block_latencies_ms=[2.0],
+            prefill_time_ms=0.5,
+            draft_proposal_time_ms=0.4,
+            target_verification_time_ms=0.8,
+            sampling_overhead_time_ms=0.3,
+            target_processed_tokens=8,
+            draft_processed_tokens=10,
+            draft_compiled=True,
+            draft_cache_implementation="static",
+            target_cache_implementation="dynamic",
+            adaptive_speculation=True,
+            initial_speculation_length=3,
+            realized_speculation_lengths=[3, 5],
         )
 
     results = run_benchmark(generate, ["prompt"], warmup_runs=0, trials=2, seed=1)
@@ -48,3 +60,25 @@ def test_harness_summarizes_speculative_acceptance() -> None:
     assert results["summary"]["accepted_tokens"] == 6
     assert results["summary"]["acceptance_rate"] == 0.75
     assert results["summary"]["target_forward_passes"] == 4
+    assert results["summary"]["target_processed_tokens"] == 16
+    assert results["summary"]["draft_processed_tokens"] == 20
+    assert results["summary"]["draft_proposal_time_ms"] == 0.8
+    assert results["summary"]["target_verification_time_ms"] == 1.6
+    assert results["summary"]["sampling_overhead_time_ms"] == 0.6
+    assert results["summary"]["draft_compiled"] is True
+    assert results["summary"]["draft_cache_implementation"] == "static"
+    assert results["summary"]["target_cache_implementation"] == "dynamic"
+    assert results["summary"]["adaptive_speculation"] is True
+    assert results["summary"]["initial_speculation_length"] == 3
+    assert results["summary"]["realized_speculation_length_mean"] == 4.0
+    assert results["summary"]["realized_speculation_length_median"] == 4.0
+
+
+def test_write_results_replaces_output_without_leaving_checkpoint(tmp_path) -> None:
+    output = tmp_path / "results.json"
+    output.write_text('{"old": true}\n', encoding="utf-8")
+
+    write_results({"new": True}, output)
+
+    assert output.read_text(encoding="utf-8") == '{\n  "new": true\n}\n'
+    assert not (tmp_path / "results.json.tmp").exists()

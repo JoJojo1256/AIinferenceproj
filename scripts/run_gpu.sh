@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 baseline|speculative [experiment arguments...]" >&2
+    echo "Usage: $0 baseline|speculative|sweep [experiment arguments...]" >&2
     exit 2
 fi
 
@@ -31,8 +31,11 @@ case "$experiment" in
     speculative)
         exec python -u experiments/run_speculative.py "$@"
         ;;
+    sweep)
+        exec python -u experiments/run_sweep.py "$@"
+        ;;
     *)
-        echo "Unknown experiment '$experiment'; choose baseline or speculative." >&2
+        echo "Unknown experiment '$experiment'; choose baseline, speculative, or sweep." >&2
         exit 2
         ;;
 esac

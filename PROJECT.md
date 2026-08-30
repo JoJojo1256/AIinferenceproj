@@ -12,7 +12,9 @@ An implementation of **speculative decoding** from the algorithm up, plus a rigo
 
 **Why this design:** the goal is to demonstrate genuine understanding of LLM inference performance, not just the ability to flip a library flag. The value is concentrated in three things a coding agent must NOT shortcut:
 1. A **correct, distribution-preserving** accept/reject rule (the subtle part).
-2. A **hard correctness proof** (greedy output must be token-for-token identical to standard decoding).
+2. A **hard correctness proof** (greedy output is token-for-token identical to
+   standard decoding in exact arithmetic; real finite-precision kernel shapes
+   are characterized separately).
 3. An **honest performance study** with plots, including a negative result.
 
 **Non-goals:** This project does NOT write custom CUDA/attention kernels. It builds on top of HuggingFace `transformers`. Kernel work is explicitly out of scope.
@@ -114,7 +116,11 @@ Tasks:
 **Goal:** prove the implementation preserves the target model's output distribution.
 
 Tasks:
-- `tests/test_correctness.py`: **greedy equality test** — with temperature 0, speculative output must be **token-for-token identical** to standard greedy decoding from `baseline.py`, for every prompt in a fixed set. This is a hard assertion.
+- `tests/test_correctness.py`: **greedy equality test** — with temperature 0,
+  speculative output must be **token-for-token identical** to standard greedy
+  decoding from `baseline.py`, for every prompt in a fixed set. This is a hard
+  assertion for the deterministic test path. The real-model GPU gate separately
+  measures finite-precision shape effects; see the README correctness section.
 - Distribution test — with temperature > 0 and a fixed seed regime, run many generations and show the speculative output token-distribution matches the baseline's within statistical tolerance (e.g. compare token-frequency histograms / a chi-square or KL check at the first divergence point).
 - `tests/test_sampling.py`: unit-test the accept/reject rule directly on hand-constructed `p`/`q` distributions with known expected acceptance behavior.
 

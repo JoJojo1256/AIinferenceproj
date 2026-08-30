@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Sequence
 
 import numpy as np
@@ -38,6 +38,18 @@ class SpeculativeGenerationMetrics(GenerationMetrics):
     accepted_tokens: int
     target_forward_passes: int
     block_latencies_ms: list[float]
+    prefill_time_ms: float = 0.0
+    draft_proposal_time_ms: float = 0.0
+    target_verification_time_ms: float = 0.0
+    sampling_overhead_time_ms: float = 0.0
+    target_processed_tokens: int = 0
+    draft_processed_tokens: int = 0
+    draft_compiled: bool = False
+    draft_cache_implementation: str = "dynamic"
+    target_cache_implementation: str = "dynamic"
+    adaptive_speculation: bool = False
+    initial_speculation_length: int = 0
+    realized_speculation_lengths: list[int] = field(default_factory=list)
 
     @property
     def acceptance_rate(self) -> float:
@@ -45,9 +57,20 @@ class SpeculativeGenerationMetrics(GenerationMetrics):
             return 0.0
         return self.accepted_tokens / self.proposed_tokens
 
+    @property
+    def realized_speculation_length_mean(self) -> float:
+        lengths = self.realized_speculation_lengths
+        return float(np.mean(lengths)) if lengths else 0.0
+
+    @property
+    def realized_speculation_length_median(self) -> float:
+        return percentile(self.realized_speculation_lengths, 50)
+
     def to_dict(self) -> dict[str, object]:
         data = super().to_dict()
         data["acceptance_rate"] = self.acceptance_rate
+        data["realized_speculation_length_mean"] = self.realized_speculation_length_mean
+        data["realized_speculation_length_median"] = self.realized_speculation_length_median
         return data
 
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=specdec-baseline
+#SBATCH --job-name=specdec-phase3
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=40G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=results/logs/%x_%j.out
 #SBATCH --error=results/logs/%x_%j.err
 
@@ -28,8 +28,7 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
     exit 1
 fi
 
-python -u experiments/run_baseline.py \
-    --workload qa \
+python -u experiments/run_sweep.py \
     --dtype bfloat16 \
     --max-new-tokens 128 \
     --warmup-runs 3 \
